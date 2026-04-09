@@ -9,8 +9,30 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
+# ── Vercel / KV config ─────────────────────────────────────────────────────
+IS_VERCEL   = bool(os.environ.get("VERCEL"))
+KV_URL      = os.environ.get("KV_REST_API_URL","")
+KV_TOKEN    = os.environ.get("KV_REST_API_TOKEN","")
+UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET","changeme")
+
+def kv_get(key):
+    if not KV_URL: return None
+    try:
+        r=requests.get(f"{KV_URL}/get/{key}",headers={"Authorization":f"Bearer {KV_TOKEN}"},timeout=5)
+        if r.ok: return r.json().get("result")
+    except: pass
+    return None
+
+def kv_set(key,value):
+    if not KV_URL: return
+    try:
+        requests.post(f"{KV_URL}/set/{key}",
+            headers={"Authorization":f"Bearer {KV_TOKEN}","Content-Type":"text/plain"},
+            data=value if isinstance(value,str) else value,timeout=5)
+    except: pass
+
 app  = Flask(__name__)
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = "/tmp" if IS_VERCEL else os.path.dirname(os.path.abspath(__file__))
 DATA_FILE  = os.path.join(BASE, "data",  "watchlists.json")
 CACHE_FILE = os.path.join(BASE, "cache", "prices.json")
 os.makedirs(os.path.join(BASE, "data"),  exist_ok=True)
@@ -131,11 +153,26 @@ ETF_NAMES = {
 # ── Persistence ────────────────────────────────────────────────────────────────
 def load_watchlists():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f: return json.load(f)
+        try:
+            with open(DATA_FILE) as f: return json.load(f)
+        except: pass
+    # Try KV (Vercel)
+    raw=kv_get("watchlists")
+    if raw:
+        try:
+            data=json.loads(raw)
+            try:
+                with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
+            except: pass
+            return data
+        except: pass
     save_watchlists(DEFAULT_WATCHLISTS); return DEFAULT_WATCHLISTS
 
 def save_watchlists(data):
-    with open(DATA_FILE, "w") as f: json.dump(data, f, indent=2)
+    try:
+        with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
+    except: pass
+    kv_set("watchlists",json.dumps(data))
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 _fc={};_cm={"date":None,"source":None,"loaded_at":None};_lc={};_ec={}
@@ -147,7 +184,18 @@ def _load_file_cache():
         raw=json.load(open(CACHE_FILE))
         _fc=raw.get("tickers",{});_cm.update(date=raw.get("updated_date"),source=raw.get("source"),loaded_at=datetime.now())
         print(f"[cache] {len(_fc)} tickers  date={_cm['date']}  src={_cm['source']}")
-    except FileNotFoundError: print("[cache] No prices.json — live yfinance fallback.")
+    except FileNotFoundError:
+        raw=kv_get("prices_cache")
+        if raw:
+            try:
+                data=json.loads(raw)
+                _fc=data.get("tickers",{});_cm.update(date=data.get("updated_date"),source=data.get("source")+"(kv)",loaded_at=datetime.now())
+                print(f"[cache] KV {len(_fc)} tickers  date={_cm['date']}")
+                try:
+                    with open(CACHE_FILE,"w") as f: json.dump(data,f)
+                except: pass
+            except: print("[cache] KV parse error — live yfinance fallback.")
+        else: print("[cache] No prices.json — live yfinance fallback.")
     except Exception as e: print(f"[cache] Error: {e}")
 
 def _fresh(): return bool(_fc and _cm["date"]==_date.today().isoformat())
@@ -380,6 +428,65 @@ def api_cache_reload():
     _load_file_cache();_rs_s_at=None;_rs_e_at=None
     return jsonify({"ok":True,"date":_cm["date"],"count":len(_fc)})
 
+@app.route("/api/refresh_tv",methods=["POST"])
+def api_refresh_tv():
+    """Fetch prices from TradingView Screener (~15min delay, no auth needed)."""
+    global _fc,_cm,_rs_s_at,_rs_e_at
+    try:
+        from tradingview_screener import Query
+        _,df=(Query()
+            .select('name','close','change','Perf.W','Perf.1M','Perf.3M','Perf.YTD')
+            .limit(10000)
+            .get_scanner_data())
+        tickers_data={}
+        def _f(v):
+            try: return round(float(v),2)
+            except: return None
+        for _,row in df.iterrows():
+            t=str(row['name']).split(':')[-1]
+            tickers_data[t]={
+                "price":_f(row['close']),
+                "chg_1d":_f(row['change']),
+                "chg_1w":_f(row.get('Perf.W')),
+                "chg_1m":_f(row.get('Perf.1M')),
+                "chg_3m":_f(row.get('Perf.3M')),
+                "chg_ytd":_f(row.get('Perf.YTD')),
+            }
+        cache_data={"updated_date":_date.today().isoformat(),"source":"tradingview","tickers":tickers_data}
+        payload=json.dumps(cache_data)
+        try:
+            with open(CACHE_FILE,"w") as f: f.write(payload)
+        except: pass
+        kv_set("prices_cache",payload)
+        _fc=tickers_data;_cm.update(date=cache_data["updated_date"],source="tradingview",loaded_at=datetime.now())
+        _rs_s_at=None;_rs_e_at=None
+        return jsonify({"ok":True,"count":len(tickers_data),"source":"tradingview","date":cache_data["updated_date"]})
+    except Exception as e:
+        return jsonify({"error":str(e)}),500
+
+@app.route("/api/upload_cache",methods=["POST"])
+def api_upload_cache():
+    """Receive a prices.json payload from local_push.py (IBKR desktop script)."""
+    global _fc,_cm,_rs_s_at,_rs_e_at
+    secret=request.headers.get("X-Upload-Secret","")
+    if secret!=UPLOAD_SECRET:
+        return jsonify({"error":"Unauthorized"}),401
+    try:
+        data=request.get_json(force=True)
+        tickers_data=data.get("tickers",{})
+        if not tickers_data: return jsonify({"error":"Empty tickers"}),400
+        cache_data={"updated_date":data.get("updated_date",_date.today().isoformat()),"source":data.get("source","ibkr"),"tickers":tickers_data}
+        payload=json.dumps(cache_data)
+        try:
+            with open(CACHE_FILE,"w") as f: f.write(payload)
+        except: pass
+        kv_set("prices_cache",payload)
+        _fc=tickers_data;_cm.update(date=cache_data["updated_date"],source=cache_data["source"],loaded_at=datetime.now())
+        _rs_s_at=None;_rs_e_at=None
+        return jsonify({"ok":True,"count":len(tickers_data),"source":cache_data["source"],"date":cache_data["updated_date"]})
+    except Exception as e:
+        return jsonify({"error":str(e)}),500
+
 
 # ── HTML ───────────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
@@ -534,6 +641,7 @@ td{padding:5px 8px;font-size:11px;}
   <div class="tr">
     <div class="cs"><span id="csd" class="cd ms"></span><span id="cst">no cache</span><button class="cb" onclick="reloadCache()">&#8635;</button></div>
     <input class="gs" id="gs" placeholder="Search themes&hellip;" oninput="onGS()"/>
+    <button class="tbtn" id="btn-refresh" onclick="refreshTV()">&#9654; REFRESH TV</button>
     <button class="tbtn" id="btn-clean" onclick="runCleanup()">&#9003; CLEAN DEAD</button>
     <button class="tbtn am" id="btn-new" onclick="openNew()">+ NEW THEME</button>
   </div>
@@ -608,6 +716,18 @@ async function reloadCache(){
   await fetchCS();
   document.querySelector('.cb').innerHTML='&#8635;';
   if(isEtf()){loadEtfFlat();}else{perfData={};if(activeTheme)loadTheme(activeTheme);else loadPerfAll();}
+}
+async function refreshTV(){
+  var btn=document.getElementById('btn-refresh'),orig=btn.textContent;
+  btn.textContent='FETCHING...';btn.disabled=true;
+  try{
+    var d=await(await fetch('/api/refresh_tv',{method:'POST'})).json();
+    if(d.error){alert('TV Refresh error: '+d.error);return;}
+    await fetchCS();
+    if(isEtf()){loadEtfFlat();}else{perfData={};if(activeTheme)loadTheme(activeTheme);else loadPerfAll();}
+    btn.textContent='OK '+d.count+'t';
+  }catch(e){alert(e.message);}
+  setTimeout(function(){btn.textContent=orig;btn.disabled=false;},3000);
 }
 
 // BOOT
@@ -1148,3 +1268,6 @@ boot();
 if __name__ == "__main__":
     load_watchlists(); _load_file_cache()
     app.run(debug=False, port=5051)
+
+# Vercel WSGI entry point
+load_watchlists(); _load_file_cache()
