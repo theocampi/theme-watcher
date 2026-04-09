@@ -419,6 +419,19 @@ def api_etf_list():
     rs_v=[r["rs"] for r in rows if r["rs"] is not None]
     return jsonify({"rows":rows,"avg_rs":round(sum(rs_v)/len(rs_v)) if rs_v else None,"count":len(rows)})
 
+@app.route("/api/debug")
+def api_debug():
+    data = load_watchlists()
+    return jsonify({
+        "is_vercel": IS_VERCEL,
+        "kv_url_set": bool(KV_URL),
+        "data_file": DATA_FILE,
+        "cache_file": CACHE_FILE,
+        "fc_count": len(_fc),
+        "theme_count": len(data.get("themes", {})),
+        "aerospace_tickers": data.get("themes", {}).get("Aerospace & Defense", "KEY_NOT_FOUND"),
+    })
+
 @app.route("/api/cache_status")
 def api_cache_status(): return jsonify({"date":_cm["date"],"source":_cm["source"],"count":len(_fc),"fresh":_fresh()})
 
