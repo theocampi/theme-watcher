@@ -16,19 +16,19 @@ KV_TOKEN    = os.environ.get("KV_REST_API_TOKEN","")
 UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET","changeme")
 
 def kv_get(key):
-    if not KV_URL: return None
+    if not os.environ.get("REDIS_URL"): return None
     try:
-        r=requests.get(f"{KV_URL}/get/{key}",headers={"Authorization":f"Bearer {KV_TOKEN}"},timeout=5)
-        if r.ok: return r.json().get("result")
-    except: pass
-    return None
+        import redis as _redis
+        r=_redis.from_url(os.environ["REDIS_URL"],decode_responses=True,socket_timeout=5)
+        return r.get(key)
+    except: return None
 
 def kv_set(key,value):
-    if not KV_URL: return
+    if not os.environ.get("REDIS_URL"): return
     try:
-        requests.post(f"{KV_URL}/set/{key}",
-            headers={"Authorization":f"Bearer {KV_TOKEN}","Content-Type":"text/plain"},
-            data=value if isinstance(value,str) else value,timeout=5)
+        import redis as _redis
+        r=_redis.from_url(os.environ["REDIS_URL"],decode_responses=True,socket_timeout=5)
+        r.set(key,value)
     except: pass
 
 app  = Flask(__name__)
