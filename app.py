@@ -257,7 +257,7 @@ def fetch_prices(tickers):
     for t in tickers:
         if t in _fc and _fc[t].get("price") is not None: result[t]=_fc[t]
         else: miss.append(t)
-    if miss:
+if miss and not IS_VERCEL:
         _live_fetch(miss)
         for t in miss:
             if t in _lc: result[t]={k:v for k,v in _lc[t].items() if k!="fa"}
@@ -269,7 +269,7 @@ def fetch_ext(tickers):
         fc=_fc.get(t,{})
         if fc.get("chg_3m") is not None or fc.get("chg_ytd") is not None: result[t]={"chg_3m":fc.get("chg_3m"),"chg_ytd":fc.get("chg_ytd")}
         else: need.append(t)
-    if need:
+if need and not IS_VERCEL:
         _ext_fetch(need)
         for t in need:
             if t in _ec: result[t]={"chg_3m":_ec[t]["chg_3m"],"chg_ytd":_ec[t]["chg_ytd"]}
