@@ -18,7 +18,7 @@ def _redis_client():
     if not url: return None
     try:
         import redis as _r
-        return _r.from_url(url, decode_responses=True, socket_timeout=4)
+        return _r.from_url(url, decode_responses=True, socket_timeout=8)
     except: return None
 
 def kv_get(key):
@@ -190,12 +190,17 @@ def _load_file_cache():
         if raw:
             try:
                 data = json.loads(raw)
-                _fc = data.get("tickers",{})
-                _cm.update(date=data.get("updated_date"), source=data.get("source","redis")+"(kv)", loaded_at=datetime.now())
-                print(f"[cache] Redis {len(_fc)} tickers  date={_cm['date']}")
-                try:
-                    with open(CACHE_FILE,"w") as f: json.dump(data,f)
-                except: pass
+                tickers = data.get("tickers",{})
+                if len(tickers) > 5000:
+                    # Old bloated cache — skip it, will be replaced on next REFRESH TV
+                    print(f"[cache] Stale bloated cache ({len(tickers)} tickers) — skipping.")
+                else:
+                    _fc = tickers
+                    _cm.update(date=data.get("updated_date"), source=data.get("source","redis")+"(kv)", loaded_at=datetime.now())
+                    print(f"[cache] Redis {len(_fc)} tickers  date={_cm['date']}")
+                    try:
+                        with open(CACHE_FILE,"w") as f: json.dump(data,f)
+                    except: pass
             except Exception as ex: print(f"[cache] Redis parse error: {ex}")
         else: print("[cache] No cache — yfinance fallback.")
     except Exception as e: print(f"[cache] Error: {e}")
