@@ -9,26 +9,28 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
-# ── Vercel / KV config ─────────────────────────────────────────────────────
-IS_VERCEL   = bool(os.environ.get("VERCEL"))
-KV_URL      = os.environ.get("KV_REST_API_URL","")
-KV_TOKEN    = os.environ.get("KV_REST_API_TOKEN","")
+# ── Vercel / Redis config ──────────────────────────────────────────────────
+IS_VERCEL     = bool(os.environ.get("VERCEL"))
 UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET","changeme")
 
-def kv_get(key):
-    if not os.environ.get("REDIS_URL"): return None
+def _redis_client():
+    url = os.environ.get("REDIS_URL")
+    if not url: return None
     try:
-        import redis as _redis
-        r=_redis.from_url(os.environ["REDIS_URL"],decode_responses=True,socket_timeout=5)
-        return r.get(key)
+        import redis as _r
+        return _r.from_url(url, decode_responses=True, socket_timeout=4)
     except: return None
 
-def kv_set(key,value):
-    if not os.environ.get("REDIS_URL"): return
+def kv_get(key):
     try:
-        import redis as _redis
-        r=_redis.from_url(os.environ["REDIS_URL"],decode_responses=True,socket_timeout=5)
-        r.set(key,value)
+        r = _redis_client()
+        return r.get(key) if r else None
+    except: return None
+
+def kv_set(key, value):
+    try:
+        r = _redis_client()
+        if r: r.set(key, value)
     except: pass
 
 app  = Flask(__name__)
@@ -156,11 +158,10 @@ def load_watchlists():
         try:
             with open(DATA_FILE) as f: return json.load(f)
         except: pass
-    # Try KV (Vercel)
-    raw=kv_get("watchlists")
+    raw = kv_get("watchlists")
     if raw:
         try:
-            data=json.loads(raw)
+            data = json.loads(raw)
             try:
                 with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
             except: pass
@@ -172,7 +173,7 @@ def save_watchlists(data):
     try:
         with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
     except: pass
-    kv_set("watchlists",json.dumps(data))
+    kv_set("watchlists", json.dumps(data))
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 _fc={};_cm={"date":None,"source":None,"loaded_at":None};_lc={};_ec={}
@@ -185,17 +186,18 @@ def _load_file_cache():
         _fc=raw.get("tickers",{});_cm.update(date=raw.get("updated_date"),source=raw.get("source"),loaded_at=datetime.now())
         print(f"[cache] {len(_fc)} tickers  date={_cm['date']}  src={_cm['source']}")
     except FileNotFoundError:
-        raw=kv_get("prices_cache")
+        raw = kv_get("prices_cache")
         if raw:
             try:
-                data=json.loads(raw)
-                _fc=data.get("tickers",{});_cm.update(date=data.get("updated_date"),source=data.get("source")+"(kv)",loaded_at=datetime.now())
-                print(f"[cache] KV {len(_fc)} tickers  date={_cm['date']}")
+                data = json.loads(raw)
+                _fc = data.get("tickers",{})
+                _cm.update(date=data.get("updated_date"), source=data.get("source","redis")+"(kv)", loaded_at=datetime.now())
+                print(f"[cache] Redis {len(_fc)} tickers  date={_cm['date']}")
                 try:
                     with open(CACHE_FILE,"w") as f: json.dump(data,f)
                 except: pass
-            except: print("[cache] KV parse error — live yfinance fallback.")
-        else: print("[cache] No prices.json — live yfinance fallback.")
+            except Exception as ex: print(f"[cache] Redis parse error: {ex}")
+        else: print("[cache] No cache — yfinance fallback.")
     except Exception as e: print(f"[cache] Error: {e}")
 
 def _fresh(): return bool(_fc and _cm["date"]==_date.today().isoformat())
@@ -257,7 +259,7 @@ def fetch_prices(tickers):
     for t in tickers:
         if t in _fc and _fc[t].get("price") is not None: result[t]=_fc[t]
         else: miss.append(t)
-if miss and not IS_VERCEL:
+    if miss and not IS_VERCEL:
         _live_fetch(miss)
         for t in miss:
             if t in _lc: result[t]={k:v for k,v in _lc[t].items() if k!="fa"}
@@ -269,7 +271,7 @@ def fetch_ext(tickers):
         fc=_fc.get(t,{})
         if fc.get("chg_3m") is not None or fc.get("chg_ytd") is not None: result[t]={"chg_3m":fc.get("chg_3m"),"chg_ytd":fc.get("chg_ytd")}
         else: need.append(t)
-if need and not IS_VERCEL:
+    if need and not IS_VERCEL:
         _ext_fetch(need)
         for t in need:
             if t in _ec: result[t]={"chg_3m":_ec[t]["chg_3m"],"chg_ytd":_ec[t]["chg_ytd"]}
@@ -419,19 +421,6 @@ def api_etf_list():
     rs_v=[r["rs"] for r in rows if r["rs"] is not None]
     return jsonify({"rows":rows,"avg_rs":round(sum(rs_v)/len(rs_v)) if rs_v else None,"count":len(rows)})
 
-@app.route("/api/debug")
-def api_debug():
-    data = load_watchlists()
-    return jsonify({
-        "is_vercel": IS_VERCEL,
-        "kv_url_set": bool(KV_URL),
-        "data_file": DATA_FILE,
-        "cache_file": CACHE_FILE,
-        "fc_count": len(_fc),
-        "theme_count": len(data.get("themes", {})),
-        "aerospace_tickers": data.get("themes", {}).get("Aerospace & Defense", "KEY_NOT_FOUND"),
-    })
-
 @app.route("/api/cache_status")
 def api_cache_status(): return jsonify({"date":_cm["date"],"source":_cm["source"],"count":len(_fc),"fresh":_fresh()})
 
@@ -443,7 +432,7 @@ def api_cache_reload():
 
 @app.route("/api/refresh_tv",methods=["POST"])
 def api_refresh_tv():
-    """Fetch prices from TradingView Screener (~15min delay, no auth needed)."""
+    """Fetch prices from TradingView Screener — only stores needed tickers."""
     global _fc,_cm,_rs_s_at,_rs_e_at
     try:
         from tradingview_screener import Query
@@ -451,7 +440,6 @@ def api_refresh_tv():
             .select('name','close','change','Perf.W','Perf.1M','Perf.3M','Perf.YTD')
             .limit(10000)
             .get_scanner_data())
-# Only keep tickers we actually need (~700 vs 10,000 → 20x smaller payload)
         wl=load_watchlists()
         needed=set(ETF_TICKERS)|{t for v in wl["themes"].values() for t in v}
         tickers_data={}
@@ -461,14 +449,9 @@ def api_refresh_tv():
         for _,row in df.iterrows():
             t=str(row['name']).split(':')[-1]
             if t not in needed: continue
-            tickers_data[t]={
-                "price":_f(row['close']),
-                "chg_1d":_f(row['change']),
-                "chg_1w":_f(row.get('Perf.W')),
-                "chg_1m":_f(row.get('Perf.1M')),
-                "chg_3m":_f(row.get('Perf.3M')),
-                "chg_ytd":_f(row.get('Perf.YTD')),
-            }
+            tickers_data[t]={"price":_f(row['close']),"chg_1d":_f(row['change']),
+                "chg_1w":_f(row.get('Perf.W')),"chg_1m":_f(row.get('Perf.1M')),
+                "chg_3m":_f(row.get('Perf.3M')),"chg_ytd":_f(row.get('Perf.YTD'))}
         cache_data={"updated_date":_date.today().isoformat(),"source":"tradingview","tickers":tickers_data}
         payload=json.dumps(cache_data)
         try:
@@ -483,11 +466,9 @@ def api_refresh_tv():
 
 @app.route("/api/upload_cache",methods=["POST"])
 def api_upload_cache():
-    """Receive a prices.json payload from local_push.py (IBKR desktop script)."""
     global _fc,_cm,_rs_s_at,_rs_e_at
     secret=request.headers.get("X-Upload-Secret","")
-    if secret!=UPLOAD_SECRET:
-        return jsonify({"error":"Unauthorized"}),401
+    if secret!=UPLOAD_SECRET: return jsonify({"error":"Unauthorized"}),401
     try:
         data=request.get_json(force=True)
         tickers_data=data.get("tickers",{})
@@ -503,6 +484,17 @@ def api_upload_cache():
         return jsonify({"ok":True,"count":len(tickers_data),"source":cache_data["source"],"date":cache_data["updated_date"]})
     except Exception as e:
         return jsonify({"error":str(e)}),500
+
+@app.route("/api/debug")
+def api_debug():
+    data=load_watchlists()
+    redis_ok=False
+    try:
+        r=_redis_client(); redis_ok=r is not None and bool(r.ping())
+    except: pass
+    return jsonify({"is_vercel":IS_VERCEL,"redis_ok":redis_ok,
+        "fc_count":len(_fc),"theme_count":len(data.get("themes",{})),
+        "cache_date":_cm["date"],"cache_source":_cm["source"]})
 
 
 # ── HTML ───────────────────────────────────────────────────────────────────────
@@ -1286,5 +1278,9 @@ if __name__ == "__main__":
     load_watchlists(); _load_file_cache()
     app.run(debug=False, port=5051)
 
-# Vercel WSGI entry point
-load_watchlists(); _load_file_cache()
+# Vercel WSGI entry point — errors caught so cold start never crashes
+try:
+    load_watchlists()
+    _load_file_cache()
+except Exception as _startup_err:
+    print(f"[startup] {_startup_err}")
