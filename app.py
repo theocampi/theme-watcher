@@ -451,12 +451,16 @@ def api_refresh_tv():
             .select('name','close','change','Perf.W','Perf.1M','Perf.3M','Perf.YTD')
             .limit(10000)
             .get_scanner_data())
+# Only keep tickers we actually need (~700 vs 10,000 → 20x smaller payload)
+        wl=load_watchlists()
+        needed=set(ETF_TICKERS)|{t for v in wl["themes"].values() for t in v}
         tickers_data={}
         def _f(v):
             try: return round(float(v),2)
             except: return None
         for _,row in df.iterrows():
             t=str(row['name']).split(':')[-1]
+            if t not in needed: continue
             tickers_data[t]={
                 "price":_f(row['close']),
                 "chg_1d":_f(row['change']),
