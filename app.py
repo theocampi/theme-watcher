@@ -844,15 +844,21 @@ function showPerf(){
 
 async function loadPerfAll(){
   perfData={}; perfLoading=themeOrder.length; renderPerfChart();
-  await Promise.allSettled(themeOrder.map(function(theme){
-    return fetch('/api/theme_perf/'+encodeURIComponent(theme))
-      .then(function(r){return r.json();})
-      .then(function(d){
-        perfData[d.theme]={avg_1d:d.avg_1d,avg_1w:d.avg_1w,avg_1m:d.avg_1m,avg_rs:d.avg_rs,adv:d.adv,dec:d.dec};
-        perfLoading=Math.max(0,perfLoading-1);
-        if(!activeTheme)renderPerfChart(); renderSidebar();
-      }).catch(function(){perfLoading=Math.max(0,perfLoading-1);});
-  }));
+  // Batch requests 6 at a time to avoid Vercel concurrency limits
+  var themes=themeOrder.slice();
+  var BATCH=6;
+  for(var i=0;i<themes.length;i+=BATCH){
+    var batch=themes.slice(i,i+BATCH);
+    await Promise.allSettled(batch.map(function(theme){
+      return fetch('/api/theme_perf/'+encodeURIComponent(theme))
+        .then(function(r){return r.json();})
+        .then(function(d){
+          perfData[d.theme]={avg_1d:d.avg_1d,avg_1w:d.avg_1w,avg_1m:d.avg_1m,avg_rs:d.avg_rs,adv:d.adv,dec:d.dec};
+          perfLoading=Math.max(0,perfLoading-1);
+          if(!activeTheme)renderPerfChart(); renderSidebar();
+        }).catch(function(){perfLoading=Math.max(0,perfLoading-1);});
+    }));
+  }
 }
 
 function setPeriod(p){
