@@ -435,6 +435,37 @@ def api_cache_reload():
     _load_file_cache();_rs_s_at=None;_rs_e_at=None
     return jsonify({"ok":True,"date":_cm["date"],"count":len(_fc)})
 
+@app.route("/api/all_theme_perfs")
+def api_all_theme_perfs():
+    """Return perf data for ALL themes in one shot — avoids 54 separate cold-start calls."""
+    data = load_watchlists()
+    themes = data["themes"]
+    order  = data.get("order", list(themes.keys()))
+    # Load prices once for all tickers
+    all_tickers = list({t for v in themes.values() for t in v})
+    if _cm["loaded_at"] is None: _load_file_cache()
+    prices = fetch_prices(all_tickers)
+    rs_uni = get_rs_stocks()
+    result = {}
+    for theme, tickers in themes.items():
+        if not tickers:
+            result[theme] = {"avg_1d":None,"avg_1w":None,"avg_1m":None,"avg_rs":None,"adv":0,"dec":0,"count":0}
+            continue
+        def avg(field):
+            v=[prices[t][field] for t in tickers if t in prices and prices[t].get(field) is not None]
+            return round(sum(v)/len(v),2) if v else None
+        rs_v=[rs_uni[t] for t in tickers if rs_uni.get(t) is not None]
+        result[theme]={
+            "avg_1d": avg("chg_1d"),
+            "avg_1w": avg("chg_1w"),
+            "avg_1m": avg("chg_1m"),
+            "avg_rs": round(sum(rs_v)/len(rs_v)) if rs_v else None,
+            "adv": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)>0),
+            "dec": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)<0),
+            "count": len(tickers),
+        }
+    return jsonify({"themes": result, "order": order})
+
 @app.route("/api/refresh_tv",methods=["POST"])
 def api_refresh_tv():
     """Fetch prices from TradingView Screener — only stores needed tickers."""
@@ -844,20 +875,20 @@ function showPerf(){
 
 async function loadPerfAll(){
   perfData={}; perfLoading=themeOrder.length; renderPerfChart();
-  // Batch requests 6 at a time to avoid Vercel concurrency limits
-  var themes=themeOrder.slice();
-  var BATCH=6;
-  for(var i=0;i<themes.length;i+=BATCH){
-    var batch=themes.slice(i,i+BATCH);
-    await Promise.allSettled(batch.map(function(theme){
-      return fetch('/api/theme_perf/'+encodeURIComponent(theme))
-        .then(function(r){return r.json();})
-        .then(function(d){
-          perfData[d.theme]={avg_1d:d.avg_1d,avg_1w:d.avg_1w,avg_1m:d.avg_1m,avg_rs:d.avg_rs,adv:d.adv,dec:d.dec};
-          perfLoading=Math.max(0,perfLoading-1);
-          if(!activeTheme)renderPerfChart(); renderSidebar();
-        }).catch(function(){perfLoading=Math.max(0,perfLoading-1);});
-    }));
+  try{
+    // Single request returns all 54 themes at once — no concurrency issues
+    var d=await(await fetch('/api/all_theme_perfs')).json();
+    themeOrder=d.order;
+    Object.keys(d.themes).forEach(function(theme){
+      var t=d.themes[theme];
+      perfData[theme]={avg_1d:t.avg_1d,avg_1w:t.avg_1w,avg_1m:t.avg_1m,avg_rs:t.avg_rs,adv:t.adv,dec:t.dec};
+      themeCounts[theme]=t.count;
+    });
+    perfLoading=0;
+    renderPerfChart(); renderSidebar();
+  }catch(e){
+    console.error('all_theme_perfs failed:',e);
+    perfLoading=0; renderPerfChart();
   }
 }
 
