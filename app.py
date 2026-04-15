@@ -153,21 +153,46 @@ ETF_NAMES = {
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
+def _merge_with_defaults(data):
+    """Backfill any empty themes from DEFAULT_WATCHLISTS so tickers are never lost."""
+    changed = False
+    for theme, default_tickers in DEFAULT_WATCHLISTS["themes"].items():
+        if theme in data["themes"] and len(data["themes"][theme]) == 0 and default_tickers:
+            data["themes"][theme] = default_tickers
+            changed = True
+    if "order" not in data or not data["order"]:
+        data["order"] = list(data["themes"].keys())
+        changed = True
+    return data, changed
+
 def load_watchlists():
+    # Try local file first
     if os.path.exists(DATA_FILE):
         try:
-            with open(DATA_FILE) as f: return json.load(f)
+            with open(DATA_FILE) as f:
+                data = json.load(f)
+            data, changed = _merge_with_defaults(data)
+            if changed:
+                save_watchlists(data)
+            return data
         except: pass
+    # Try Redis
     raw = kv_get("watchlists")
     if raw:
         try:
             data = json.loads(raw)
-            try:
-                with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
-            except: pass
+            data, changed = _merge_with_defaults(data)
+            if changed:
+                save_watchlists(data)  # fix Redis too
+            else:
+                try:
+                    with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
+                except: pass
             return data
         except: pass
-    save_watchlists(DEFAULT_WATCHLISTS); return DEFAULT_WATCHLISTS
+    # Fallback to defaults
+    save_watchlists(DEFAULT_WATCHLISTS)
+    return DEFAULT_WATCHLISTS
 
 def save_watchlists(data):
     try:
@@ -521,6 +546,17 @@ def api_upload_cache():
     except Exception as e:
         return jsonify({"error":str(e)}),500
 
+@app.route("/api/reset_watchlists",methods=["POST"])
+def api_reset_watchlists():
+    """Wipe stored watchlists and reset to DEFAULT — fixes empty themes."""
+    import shutil
+    try:
+        os.remove(DATA_FILE)
+    except: pass
+    kv_set("watchlists", json.dumps(DEFAULT_WATCHLISTS))
+    save_watchlists(DEFAULT_WATCHLISTS)
+    return jsonify({"ok":True,"themes":len(DEFAULT_WATCHLISTS["themes"])})
+
 @app.route("/api/debug")
 def api_debug():
     data=load_watchlists()
@@ -687,6 +723,7 @@ td{padding:5px 8px;font-size:11px;}
     <div class="cs"><span id="csd" class="cd ms"></span><span id="cst">no cache</span><button class="cb" onclick="reloadCache()">&#8635;</button></div>
     <input class="gs" id="gs" placeholder="Search themes&hellip;" oninput="onGS()"/>
     <button class="tbtn" id="btn-refresh" onclick="refreshTV()">&#9654; REFRESH TV</button>
+    <button class="tbtn" id="btn-reset" onclick="resetWatchlists()" title="Reset all themes to defaults">&#8635; RESET LISTS</button>
     <button class="tbtn" id="btn-clean" onclick="runCleanup()">&#9003; CLEAN DEAD</button>
     <button class="tbtn am" id="btn-new" onclick="openNew()">+ NEW THEME</button>
   </div>
@@ -761,6 +798,22 @@ async function reloadCache(){
   await fetchCS();
   document.querySelector('.cb').innerHTML='&#8635;';
   if(isEtf()){loadEtfFlat();}else{perfData={};if(activeTheme)loadTheme(activeTheme);else loadPerfAll();}
+}
+async function resetWatchlists(){
+  if(!confirm('Reset ALL watchlists to defaults? Custom changes will be lost.'))return;
+  var btn=document.getElementById('btn-reset');
+  btn.textContent='RESETTING...';btn.disabled=true;
+  try{
+    var d=await(await fetch('/api/reset_watchlists',{method:'POST'})).json();
+    if(d.ok){
+      perfData={};themeOrder=[];themeCounts={};activeTheme=null;
+      var r=await(await fetch('/api/themes')).json();
+      themeOrder=r.order;themeCounts=r.themes;
+      renderSidebar();showPerf();loadPerfAll();
+      btn.textContent='DONE';
+    }
+  }catch(e){alert(e.message);}
+  setTimeout(function(){btn.textContent='&#8635; RESET LISTS';btn.disabled=false;},2500);
 }
 async function refreshTV(){
   var btn=document.getElementById('btn-refresh'),orig=btn.textContent;
