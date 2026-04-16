@@ -153,67 +153,82 @@ ETF_NAMES = {
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
-def _heal_watchlists(data):
-    """Ensure every default theme has its tickers. Returns (data, was_changed)."""
-    changed = False
-    if "themes" not in data:
-        return DEFAULT_WATCHLISTS, True
-    for theme, default_tickers in DEFAULT_WATCHLISTS["themes"].items():
-        stored = data["themes"].get(theme, [])
-        if len(stored) == 0 and len(default_tickers) > 0:
-            data["themes"][theme] = list(default_tickers)
-            changed = True
-    # Ensure all default themes exist
-    for theme in DEFAULT_WATCHLISTS["themes"]:
+# ── Watchlist persistence: diff-based model ──────────────────────────────────
+# DEFAULT_WATCHLISTS is always the source of truth for default tickers.
+# Redis stores only a "diff": user additions and removals per theme.
+# Empty Redis = pristine defaults. Corruption is impossible.
+
+def _apply_diff(diff):
+    """Build full watchlist by applying diff on top of DEFAULT_WATCHLISTS."""
+    import copy
+    data = copy.deepcopy(DEFAULT_WATCHLISTS)
+    added   = diff.get("added", {})
+    removed = diff.get("removed", {})
+    new_themes = diff.get("new_themes", {})
+    order_extra = diff.get("order_extra", [])
+    # Apply additions to default themes
+    for theme, tickers in added.items():
+        if theme in data["themes"]:
+            existing = set(data["themes"][theme])
+            data["themes"][theme] += [t for t in tickers if t not in existing]
+    # Apply removals
+    for theme, tickers in removed.items():
+        if theme in data["themes"]:
+            rm = set(tickers)
+            data["themes"][theme] = [t for t in data["themes"][theme] if t not in rm]
+    # Apply user-created themes
+    for theme, tickers in new_themes.items():
         if theme not in data["themes"]:
-            data["themes"][theme] = list(DEFAULT_WATCHLISTS["themes"][theme])
-            changed = True
-    if "order" not in data or len(data.get("order",[])) == 0:
-        data["order"] = list(DEFAULT_WATCHLISTS["order"])
-        changed = True
-    return data, changed
+            data["themes"][theme] = tickers
+            if theme not in data["order"]:
+                data["order"].append(theme)
+    # Add any extra ordering
+    for theme in order_extra:
+        if theme in data["themes"] and theme not in data["order"]:
+            data["order"].append(theme)
+    return data
+
+def _compute_diff(data):
+    """Compute minimal diff between data and DEFAULT_WATCHLISTS."""
+    diff = {"added": {}, "removed": {}, "new_themes": {}, "order_extra": []}
+    default_themes = DEFAULT_WATCHLISTS["themes"]
+    for theme, tickers in data["themes"].items():
+        if theme not in default_themes:
+            diff["new_themes"][theme] = tickers
+            if theme not in DEFAULT_WATCHLISTS["order"]:
+                diff["order_extra"].append(theme)
+        else:
+            default_set = set(default_themes[theme])
+            current_set = set(tickers)
+            added = [t for t in tickers if t not in default_set]
+            removed = [t for t in default_themes[theme] if t not in current_set]
+            if added:   diff["added"][theme] = added
+            if removed: diff["removed"][theme] = removed
+    return diff
 
 def load_watchlists():
-    # On Vercel: always start from Redis (ignore potentially stale /tmp file)
-    if IS_VERCEL:
-        raw = kv_get("watchlists")
-        if raw:
-            try:
-                data = json.loads(raw)
-                data, changed = _heal_watchlists(data)
-                if changed:
-                    kv_set("watchlists", json.dumps(data))
-                return data
-            except: pass
-        # Redis empty or corrupt — reset to defaults and save
-        kv_set("watchlists", json.dumps(DEFAULT_WATCHLISTS))
-        return DEFAULT_WATCHLISTS
-
-    # Local: try file then Redis then defaults
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE) as f:
-                data = json.load(f)
-            data, changed = _heal_watchlists(data)
-            if changed:
-                with open(DATA_FILE,"w") as f2: json.dump(data,f2,indent=2)
-            return data
-        except: pass
-    raw = kv_get("watchlists")
+    raw = kv_get("watchlist_diff")
     if raw:
         try:
-            data = json.loads(raw)
-            data, _ = _heal_watchlists(data)
-            return data
+            diff = json.loads(raw)
+            return _apply_diff(diff)
         except: pass
-    save_watchlists(DEFAULT_WATCHLISTS)
-    return DEFAULT_WATCHLISTS
+    # No diff stored → pure defaults (also covers first run)
+    if not IS_VERCEL and os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE) as f:
+                return json.load(f)
+        except: pass
+    return _apply_diff({})
 
 def save_watchlists(data):
-    try:
-        with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
-    except: pass
-    kv_set("watchlists", json.dumps(data))
+    diff = _compute_diff(data)
+    payload = json.dumps(diff)
+    kv_set("watchlist_diff", payload)
+    if not IS_VERCEL:
+        try:
+            with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
+        except: pass
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 _fc={};_cm={"date":None,"source":None,"loaded_at":None};_lc={};_ec={}
@@ -563,23 +578,28 @@ def api_upload_cache():
 
 @app.route("/api/reset_watchlists",methods=["POST"])
 def api_reset_watchlists():
-    """Wipe stored watchlists and reset to DEFAULT — fixes empty themes."""
+    """Delete the diff from Redis → next load_watchlists() returns pure defaults."""
     try: os.remove(DATA_FILE)
     except: pass
-    payload = json.dumps(DEFAULT_WATCHLISTS)
-    kv_set("watchlists", payload)
+    # Delete both old key and new key to be safe
     try:
-        with open(DATA_FILE,"w") as f: f.write(payload)
+        r = _redis_client()
+        if r:
+            r.delete("watchlist_diff")
+            r.delete("watchlists")
     except: pass
-    return jsonify({"ok":True,"themes":len(DEFAULT_WATCHLISTS["themes"]),"tickers":sum(len(v) for v in DEFAULT_WATCHLISTS["themes"].values())})
+    data = _apply_diff({})
+    return jsonify({"ok":True,"themes":len(data["themes"]),
+                    "tickers":sum(len(v) for v in data["themes"].values()),
+                    "sample_ar":data["themes"].get("Augmented Reality",[])})
 
 @app.route("/api/watchlist_status")
 def api_watchlist_status():
-    """Diagnose watchlist health — returns empty theme names."""
     data = load_watchlists()
     empty = [t for t,v in data["themes"].items() if len(v)==0]
-    total = {t:len(v) for t,v in data["themes"].items()}
-    return jsonify({"empty_themes":empty,"counts":total,"redis_has_data":kv_get("watchlists") is not None})
+    return jsonify({"empty_themes":empty,
+                    "counts":{t:len(v) for t,v in data["themes"].items()},
+                    "diff_in_redis": kv_get("watchlist_diff") is not None})
 
 @app.route("/api/debug")
 def api_debug():
@@ -859,10 +879,11 @@ async function boot(){
   document.getElementById('btn-new').style.display='';
   var d=await(await fetch('/api/themes')).json();
   themeOrder=d.order; themeCounts=d.themes;
-  // Auto-fix: if more than 5 themes have 0 tickers, watchlists are corrupted — reset silently
-  var emptyCount=Object.values(d.themes).filter(function(c){return c===0;}).length;
-  if(emptyCount>5){
-    console.warn('Auto-fixing corrupted watchlists ('+emptyCount+' empty themes)...');
+  // Auto-fix: if ANY default theme has 0 tickers, reset to defaults silently
+  var defaultThemes=['Aerospace & Defense','AI Health','AI Insurance','Artificial Intelligence','Power Generation','Apparel','Argentina','Augmented Reality','EV & Battery','Banking & Finance','Big Tech / Mega Cap','Biotechnology','BNPL & Payments','Cannabis'];
+  var emptyCount=defaultThemes.filter(function(t){return (d.themes[t]||0)===0;}).length;
+  if(emptyCount>0){
+    console.warn('Auto-fixing '+emptyCount+' empty default themes...');
     await fetch('/api/reset_watchlists',{method:'POST'});
     var d2=await(await fetch('/api/themes')).json();
     themeOrder=d2.order; themeCounts=d2.themes;
