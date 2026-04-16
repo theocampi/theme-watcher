@@ -153,44 +153,59 @@ ETF_NAMES = {
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
-def _merge_with_defaults(data):
-    """Backfill any empty themes from DEFAULT_WATCHLISTS so tickers are never lost."""
+def _heal_watchlists(data):
+    """Ensure every default theme has its tickers. Returns (data, was_changed)."""
     changed = False
+    if "themes" not in data:
+        return DEFAULT_WATCHLISTS, True
     for theme, default_tickers in DEFAULT_WATCHLISTS["themes"].items():
-        if theme in data["themes"] and len(data["themes"][theme]) == 0 and default_tickers:
-            data["themes"][theme] = default_tickers
+        stored = data["themes"].get(theme, [])
+        if len(stored) == 0 and len(default_tickers) > 0:
+            data["themes"][theme] = list(default_tickers)
             changed = True
-    if "order" not in data or not data["order"]:
-        data["order"] = list(data["themes"].keys())
+    # Ensure all default themes exist
+    for theme in DEFAULT_WATCHLISTS["themes"]:
+        if theme not in data["themes"]:
+            data["themes"][theme] = list(DEFAULT_WATCHLISTS["themes"][theme])
+            changed = True
+    if "order" not in data or len(data.get("order",[])) == 0:
+        data["order"] = list(DEFAULT_WATCHLISTS["order"])
         changed = True
     return data, changed
 
 def load_watchlists():
-    # Try local file first
+    # On Vercel: always start from Redis (ignore potentially stale /tmp file)
+    if IS_VERCEL:
+        raw = kv_get("watchlists")
+        if raw:
+            try:
+                data = json.loads(raw)
+                data, changed = _heal_watchlists(data)
+                if changed:
+                    kv_set("watchlists", json.dumps(data))
+                return data
+            except: pass
+        # Redis empty or corrupt — reset to defaults and save
+        kv_set("watchlists", json.dumps(DEFAULT_WATCHLISTS))
+        return DEFAULT_WATCHLISTS
+
+    # Local: try file then Redis then defaults
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE) as f:
                 data = json.load(f)
-            data, changed = _merge_with_defaults(data)
+            data, changed = _heal_watchlists(data)
             if changed:
-                save_watchlists(data)
+                with open(DATA_FILE,"w") as f2: json.dump(data,f2,indent=2)
             return data
         except: pass
-    # Try Redis
     raw = kv_get("watchlists")
     if raw:
         try:
             data = json.loads(raw)
-            data, changed = _merge_with_defaults(data)
-            if changed:
-                save_watchlists(data)  # fix Redis too
-            else:
-                try:
-                    with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
-                except: pass
+            data, _ = _heal_watchlists(data)
             return data
         except: pass
-    # Fallback to defaults
     save_watchlists(DEFAULT_WATCHLISTS)
     return DEFAULT_WATCHLISTS
 
@@ -549,13 +564,22 @@ def api_upload_cache():
 @app.route("/api/reset_watchlists",methods=["POST"])
 def api_reset_watchlists():
     """Wipe stored watchlists and reset to DEFAULT — fixes empty themes."""
-    import shutil
-    try:
-        os.remove(DATA_FILE)
+    try: os.remove(DATA_FILE)
     except: pass
-    kv_set("watchlists", json.dumps(DEFAULT_WATCHLISTS))
-    save_watchlists(DEFAULT_WATCHLISTS)
-    return jsonify({"ok":True,"themes":len(DEFAULT_WATCHLISTS["themes"])})
+    payload = json.dumps(DEFAULT_WATCHLISTS)
+    kv_set("watchlists", payload)
+    try:
+        with open(DATA_FILE,"w") as f: f.write(payload)
+    except: pass
+    return jsonify({"ok":True,"themes":len(DEFAULT_WATCHLISTS["themes"]),"tickers":sum(len(v) for v in DEFAULT_WATCHLISTS["themes"].values())})
+
+@app.route("/api/watchlist_status")
+def api_watchlist_status():
+    """Diagnose watchlist health — returns empty theme names."""
+    data = load_watchlists()
+    empty = [t for t,v in data["themes"].items() if len(v)==0]
+    total = {t:len(v) for t,v in data["themes"].items()}
+    return jsonify({"empty_themes":empty,"counts":total,"redis_has_data":kv_get("watchlists") is not None})
 
 @app.route("/api/debug")
 def api_debug():
@@ -835,6 +859,14 @@ async function boot(){
   document.getElementById('btn-new').style.display='';
   var d=await(await fetch('/api/themes')).json();
   themeOrder=d.order; themeCounts=d.themes;
+  // Auto-fix: if more than 5 themes have 0 tickers, watchlists are corrupted — reset silently
+  var emptyCount=Object.values(d.themes).filter(function(c){return c===0;}).length;
+  if(emptyCount>5){
+    console.warn('Auto-fixing corrupted watchlists ('+emptyCount+' empty themes)...');
+    await fetch('/api/reset_watchlists',{method:'POST'});
+    var d2=await(await fetch('/api/themes')).json();
+    themeOrder=d2.order; themeCounts=d2.themes;
+  }
   renderSidebar(); showPerf();
 }
 
