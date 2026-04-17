@@ -153,78 +153,78 @@ ETF_NAMES = {
 
 
 # ── Persistence ────────────────────────────────────────────────────────────────
-# ── Watchlist persistence: diff-based model ──────────────────────────────────
-# DEFAULT_WATCHLISTS is always the source of truth for default tickers.
-# Redis stores only a "diff": user additions and removals per theme.
-# Empty Redis = pristine defaults. Corruption is impossible.
+# ── Watchlist persistence ─────────────────────────────────────────────────────
+# DEFAULT_WATCHLISTS is the immutable base. Always.
+# Redis stores only user changes: added tickers, removed tickers, new themes.
+# If Redis is empty or corrupt -> full defaults. Cannot break.
 
-def _apply_diff(diff):
-    """Build full watchlist by applying diff on top of DEFAULT_WATCHLISTS."""
-    import copy
-    data = copy.deepcopy(DEFAULT_WATCHLISTS)
-    added   = diff.get("added", {})
-    removed = diff.get("removed", {})
-    new_themes = diff.get("new_themes", {})
-    order_extra = diff.get("order_extra", [])
-    # Apply additions to default themes
-    for theme, tickers in added.items():
+import copy as _copy
+
+def _build_from_delta(delta):
+    """Apply user delta on top of DEFAULT_WATCHLISTS. Returns full watchlist dict."""
+    data = _copy.deepcopy(DEFAULT_WATCHLISTS)
+    if not delta:
+        return data
+    for theme, tickers in delta.get("added", {}).items():
         if theme in data["themes"]:
-            existing = set(data["themes"][theme])
-            data["themes"][theme] += [t for t in tickers if t not in existing]
-    # Apply removals
-    for theme, tickers in removed.items():
+            have = set(data["themes"][theme])
+            data["themes"][theme] += [t for t in tickers if t not in have]
+    for theme, tickers in delta.get("removed", {}).items():
         if theme in data["themes"]:
             rm = set(tickers)
             data["themes"][theme] = [t for t in data["themes"][theme] if t not in rm]
-    # Apply user-created themes
-    for theme, tickers in new_themes.items():
+    for theme, tickers in delta.get("custom", {}).items():
         if theme not in data["themes"]:
             data["themes"][theme] = tickers
             if theme not in data["order"]:
                 data["order"].append(theme)
-    # Add any extra ordering
-    for theme in order_extra:
-        if theme in data["themes"] and theme not in data["order"]:
-            data["order"].append(theme)
     return data
 
-def _compute_diff(data):
-    """Compute minimal diff between data and DEFAULT_WATCHLISTS."""
-    diff = {"added": {}, "removed": {}, "new_themes": {}, "order_extra": []}
-    default_themes = DEFAULT_WATCHLISTS["themes"]
+def _make_delta(data):
+    """Compute minimal delta vs DEFAULT_WATCHLISTS."""
+    delta = {"added": {}, "removed": {}, "custom": {}}
+    defaults = DEFAULT_WATCHLISTS["themes"]
     for theme, tickers in data["themes"].items():
-        if theme not in default_themes:
-            diff["new_themes"][theme] = tickers
-            if theme not in DEFAULT_WATCHLISTS["order"]:
-                diff["order_extra"].append(theme)
+        if theme not in defaults:
+            delta["custom"][theme] = tickers
         else:
-            default_set = set(default_themes[theme])
-            current_set = set(tickers)
-            added = [t for t in tickers if t not in default_set]
-            removed = [t for t in default_themes[theme] if t not in current_set]
-            if added:   diff["added"][theme] = added
-            if removed: diff["removed"][theme] = removed
-    return diff
+            ds = set(defaults[theme]); cs = set(tickers)
+            added   = [t for t in tickers if t not in ds]
+            removed = [t for t in defaults[theme] if t not in cs]
+            if added:   delta["added"][theme]   = added
+            if removed: delta["removed"][theme] = removed
+    return delta
 
 def load_watchlists():
-    raw = kv_get("watchlist_diff")
+    # Try user delta from Redis
+    raw = kv_get("wl_delta")
     if raw:
         try:
-            diff = json.loads(raw)
-            return _apply_diff(diff)
-        except: pass
-    # No diff stored → pure defaults (also covers first run)
+            delta = json.loads(raw)
+            result = _build_from_delta(delta)
+            # Sanity check: every default theme must have tickers
+            broken = [t for t in DEFAULT_WATCHLISTS["themes"] if len(result["themes"].get(t,[])) == 0 and len(DEFAULT_WATCHLISTS["themes"][t]) > 0]
+            if broken:
+                print(f"[wl] Delta produced {len(broken)} empty themes — ignoring delta")
+                kv_set("wl_delta", "{}")
+                return _build_from_delta({})
+            return result
+        except Exception as e:
+            print(f"[wl] Delta parse error: {e} — using defaults")
+    # Local file (non-Vercel dev)
     if not IS_VERCEL and os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE) as f:
-                return json.load(f)
+                d = json.load(f)
+            # Validate
+            if all(len(d["themes"].get(t,[])) > 0 for t in list(DEFAULT_WATCHLISTS["themes"])[:5]):
+                return d
         except: pass
-    return _apply_diff({})
+    return _build_from_delta({})
 
 def save_watchlists(data):
-    diff = _compute_diff(data)
-    payload = json.dumps(diff)
-    kv_set("watchlist_diff", payload)
+    delta = _make_delta(data)
+    kv_set("wl_delta", json.dumps(delta))
     if not IS_VERCEL:
         try:
             with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
@@ -578,28 +578,32 @@ def api_upload_cache():
 
 @app.route("/api/reset_watchlists",methods=["POST"])
 def api_reset_watchlists():
-    """Delete the diff from Redis → next load_watchlists() returns pure defaults."""
+    """Wipe all user deltas — restores pure DEFAULT_WATCHLISTS."""
     try: os.remove(DATA_FILE)
     except: pass
-    # Delete both old key and new key to be safe
     try:
         r = _redis_client()
         if r:
-            r.delete("watchlist_diff")
-            r.delete("watchlists")
+            for key in ["wl_delta","watchlist_diff","watchlists"]:
+                r.delete(key)
     except: pass
-    data = _apply_diff({})
+    data = _build_from_delta({})
     return jsonify({"ok":True,"themes":len(data["themes"]),
                     "tickers":sum(len(v) for v in data["themes"].values()),
-                    "sample_ar":data["themes"].get("Augmented Reality",[])})
+                    "augmented_reality":data["themes"].get("Augmented Reality",[])})
 
 @app.route("/api/watchlist_status")
 def api_watchlist_status():
     data = load_watchlists()
     empty = [t for t,v in data["themes"].items() if len(v)==0]
-    return jsonify({"empty_themes":empty,
-                    "counts":{t:len(v) for t,v in data["themes"].items()},
-                    "diff_in_redis": kv_get("watchlist_diff") is not None})
+    raw = kv_get("wl_delta")
+    return jsonify({
+        "empty_themes": empty,
+        "counts": {t:len(v) for t,v in data["themes"].items()},
+        "delta_in_redis": raw is not None,
+        "delta_content": raw[:200] if raw else None,
+        "augmented_reality": data["themes"].get("Augmented Reality",[]),
+    })
 
 @app.route("/api/debug")
 def api_debug():
@@ -879,14 +883,15 @@ async function boot(){
   document.getElementById('btn-new').style.display='';
   var d=await(await fetch('/api/themes')).json();
   themeOrder=d.order; themeCounts=d.themes;
-  // Auto-fix: if ANY default theme has 0 tickers, reset to defaults silently
-  var defaultThemes=['Aerospace & Defense','AI Health','AI Insurance','Artificial Intelligence','Power Generation','Apparel','Argentina','Augmented Reality','EV & Battery','Banking & Finance','Big Tech / Mega Cap','Biotechnology','BNPL & Payments','Cannabis'];
-  var emptyCount=defaultThemes.filter(function(t){return (d.themes[t]||0)===0;}).length;
-  if(emptyCount>0){
-    console.warn('Auto-fixing '+emptyCount+' empty default themes...');
+  // Auto-fix: if ANY well-known theme has 0 tickers, data is corrupt — reset
+  var CHECK=['Aerospace & Defense','Artificial Intelligence','Biotechnology','Augmented Reality','EV & Battery','Semiconductors','Solar Energy','Cybersecurity'];
+  var broken=CHECK.filter(function(t){return (d.themes[t]||0)===0;});
+  if(broken.length>0){
+    console.warn('[boot] Broken themes:',broken,'— auto-resetting...');
     await fetch('/api/reset_watchlists',{method:'POST'});
     var d2=await(await fetch('/api/themes')).json();
     themeOrder=d2.order; themeCounts=d2.themes;
+    console.log('[boot] Reset done, themes reloaded');
   }
   renderSidebar(); showPerf();
 }
