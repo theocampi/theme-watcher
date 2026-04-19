@@ -154,17 +154,17 @@ ETF_NAMES = {
 
 # ── Persistence ────────────────────────────────────────────────────────────────
 # ── Watchlist persistence ─────────────────────────────────────────────────────
-# DEFAULT_WATCHLISTS is the immutable base. Always.
-# Redis stores only user changes: added tickers, removed tickers, new themes.
-# If Redis is empty or corrupt -> full defaults. Cannot break.
+# On Vercel: DEFAULT_WATCHLISTS is always the base. Redis stores only the user
+# delta (added/removed tickers, new themes). Loaded and merged on every call.
+# Cannot produce empty themes for default themes.
 
 import copy as _copy
 
-def _build_from_delta(delta):
-    """Apply user delta on top of DEFAULT_WATCHLISTS. Returns full watchlist dict."""
-    data = _copy.deepcopy(DEFAULT_WATCHLISTS)
-    if not delta:
-        return data
+def _fresh_copy():
+    return _copy.deepcopy(DEFAULT_WATCHLISTS)
+
+def _apply_delta(delta):
+    data = _fresh_copy()
     for theme, tickers in delta.get("added", {}).items():
         if theme in data["themes"]:
             have = set(data["themes"][theme])
@@ -175,60 +175,55 @@ def _build_from_delta(delta):
             data["themes"][theme] = [t for t in data["themes"][theme] if t not in rm]
     for theme, tickers in delta.get("custom", {}).items():
         if theme not in data["themes"]:
-            data["themes"][theme] = tickers
+            data["themes"][theme] = list(tickers)
             if theme not in data["order"]:
                 data["order"].append(theme)
     return data
 
 def _make_delta(data):
-    """Compute minimal delta vs DEFAULT_WATCHLISTS."""
     delta = {"added": {}, "removed": {}, "custom": {}}
     defaults = DEFAULT_WATCHLISTS["themes"]
     for theme, tickers in data["themes"].items():
         if theme not in defaults:
-            delta["custom"][theme] = tickers
+            delta["custom"][theme] = list(tickers)
         else:
-            ds = set(defaults[theme]); cs = set(tickers)
+            ds = set(defaults[theme])
             added   = [t for t in tickers if t not in ds]
-            removed = [t for t in defaults[theme] if t not in cs]
+            removed = [t for t in defaults[theme] if t not in set(tickers)]
             if added:   delta["added"][theme]   = added
             if removed: delta["removed"][theme] = removed
     return delta
 
 def load_watchlists():
-    # Try user delta from Redis
-    raw = kv_get("wl_delta")
-    if raw:
-        try:
-            delta = json.loads(raw)
-            result = _build_from_delta(delta)
-            # Sanity check: every default theme must have tickers
-            broken = [t for t in DEFAULT_WATCHLISTS["themes"] if len(result["themes"].get(t,[])) == 0 and len(DEFAULT_WATCHLISTS["themes"][t]) > 0]
-            if broken:
-                print(f"[wl] Delta produced {len(broken)} empty themes — ignoring delta")
-                kv_set("wl_delta", "{}")
-                return _build_from_delta({})
-            return result
-        except Exception as e:
-            print(f"[wl] Delta parse error: {e} — using defaults")
-    # Local file (non-Vercel dev)
-    if not IS_VERCEL and os.path.exists(DATA_FILE):
+    # ALWAYS start from DEFAULT. Never trust a stored full watchlist.
+    if IS_VERCEL:
+        raw = kv_get("wl_delta")
+        if raw and raw.strip() not in ("", "{}", "null"):
+            try:
+                delta = json.loads(raw)
+                return _apply_delta(delta)
+            except:
+                pass
+        return _fresh_copy()
+    # Local dev: try file
+    if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE) as f:
-                d = json.load(f)
-            # Validate
-            if all(len(d["themes"].get(t,[])) > 0 for t in list(DEFAULT_WATCHLISTS["themes"])[:5]):
-                return d
-        except: pass
-    return _build_from_delta({})
+                return json.load(f)
+        except:
+            pass
+    return _fresh_copy()
 
 def save_watchlists(data):
-    delta = _make_delta(data)
-    kv_set("wl_delta", json.dumps(delta))
-    if not IS_VERCEL:
+    if IS_VERCEL:
+        delta = _make_delta(data)
+        kv_set("wl_delta", json.dumps(delta))
+    else:
         try:
-            with open(DATA_FILE,"w") as f: json.dump(data,f,indent=2)
-        except: pass
+            with open(DATA_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except:
+            pass
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 _fc={};_cm={"date":None,"source":None,"loaded_at":None};_lc={};_ec={}
