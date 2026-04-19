@@ -2,18 +2,18 @@
 WATCHLIST BUILDER — STOCKS + ETFs
 Run: python app.py | http://localhost:5051
 """
-import json, os
+import json, os, copy
 from datetime import datetime, date as _date
 from flask import Flask, render_template_string, jsonify, request
 import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
-# ── Vercel / Redis config ──────────────────────────────────────────────────
+# ── Vercel / Redis ──────────────────────────────────────────────────────────
 IS_VERCEL     = bool(os.environ.get("VERCEL"))
-UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET","changeme")
+UPLOAD_SECRET = os.environ.get("UPLOAD_SECRET", "changeme")
 
-def _redis_client():
+def _redis():
     url = os.environ.get("REDIS_URL")
     if not url: return None
     try:
@@ -23,13 +23,12 @@ def _redis_client():
 
 def kv_get(key):
     try:
-        r = _redis_client()
-        return r.get(key) if r else None
+        r = _redis(); return r.get(key) if r else None
     except: return None
 
 def kv_set(key, value):
     try:
-        r = _redis_client()
+        r = _redis()
         if r: r.set(key, value)
     except: pass
 
@@ -37,8 +36,10 @@ app  = Flask(__name__)
 BASE = "/tmp" if IS_VERCEL else os.path.dirname(os.path.abspath(__file__))
 DATA_FILE  = os.path.join(BASE, "data",  "watchlists.json")
 CACHE_FILE = os.path.join(BASE, "cache", "prices.json")
-os.makedirs(os.path.join(BASE, "data"),  exist_ok=True)
-os.makedirs(os.path.join(BASE, "cache"), exist_ok=True)
+try:
+    os.makedirs(os.path.join(BASE, "data"),  exist_ok=True)
+    os.makedirs(os.path.join(BASE, "cache"), exist_ok=True)
+except: pass
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
 
@@ -151,36 +152,54 @@ ETF_NAMES = {
   "SPY":"SPDR S&P 500","DBC":"Invesco DB Commodity","IDGT":"iShares US Digital Infra","IEO":"iShares US O&G E&P","XTL":"SPDR S&P Telecom","XLE":"Energy Select SPDR","XLK":"Technology Select SPDR","QQQ":"Invesco QQQ","USO":"US Oil Fund","XOP":"SPDR S&P Oil & Gas","FCG":"FT Natural Gas","DBA":"Invesco DB Agriculture","ENFR":"ALPS Alerian Energy Infra","AMLP":"Alerian MLP","XES":"SPDR S&P Oil & Gas E&S","SHV":"iShares 0-1Y Treasury","CLOU":"Global X Cloud Computing","FDN":"FT DJ Internet","IPO":"Renaissance IPO","IEI":"iShares 3-7Y Treasury","VGIT":"Vanguard Interm Treasury","IEF":"iShares 7-10Y Treasury","JNK":"SPDR Bloomberg HY Bond","AGG":"iShares Core US Aggregate","MTUM":"iShares MSCI USA Momentum","LQD":"iShares iBoxx IG Corp","UUP":"Invesco DB USD Index","UFO":"Procure Space ETF","UNG":"US Natural Gas Fund","IYZ":"iShares US Telecom","CIBR":"FT Nasdaq Cybersecurity","OIH":"VanEck Oil Services","XLU":"Utilities Select SPDR","BUZZ":"VanEck Social Sentiment","WEAT":"Teucrium Wheat","ARKF":"ARK Fintech Innovation","BTF":"CoinShares BTC & ETH","ARKX":"ARK Space & Defense","IGF":"iShares Global Infra","WCLD":"WisdomTree Cloud","DTCR":"Global X Data Centers","QQQE":"Direxion NASDAQ-100 EWI","TOLZ":"ProShares DJ Infra","BOAT":"Tidal Global Shipping","MOO":"VanEck Agribusiness","ICLN":"iShares Global Clean Energy","GUNR":"FlexShares Natural Resources","IGV":"iShares Expanded Tech-Software","VEGI":"iShares MSCI Agri Producers","FRI":"FT S&P REIT Index","GNR":"SPDR S&P Global Natural Resources","BLOK":"Amplify Blockchain Tech","XSW":"SPDR S&P Software & Services","ONLN":"ProShares Online Retail","BETZ":"Roundhill Sports Betting","TLT":"iShares 20+ Year Treasury","ARKK":"ARK Innovation","TAN":"Invesco Solar","ESPO":"VanEck Video Games & Esports","NANR":"SPDR S&P NA Natural Resources","XLSR":"SPDR SSGA US Sector Rotation","ARKQ":"ARK Autonomous Tech & Robotics","MSOS":"AdvisorShares Pure US Cannabis","WGMI":"CoinShares Bitcoin Mining","SCHH":"Schwab US REIT","SMH":"VanEck Semiconductor","ERTH":"Invesco MSCI Sustainable Future","KURE":"KraneShares MSCI China HC","XLC":"Communication Services SPDR","ARGT":"Global X MSCI Argentina","FXI":"iShares China Large Cap","RSPC":"Invesco S&P 500 EW Comm Svcs","SOXX":"iShares Semiconductor","GRID":"FT Nasdaq Clean Edge Smart Grid","QTUM":"Defiance Quantum ETF","XLRE":"Real Estate Select SPDR","CHIQ":"Global X MSCI China Cons Disc","IYR":"iShares US Real Estate","PBJ":"Invesco Food & Beverage","ITA":"iShares US Aerospace & Defense","EWZ":"iShares MSCI Brazil","PBW":"Invesco WilderHill Clean Energy","FDRV":"Fidelity Electric Vehicles","IAI":"iShares US Broker-Dealers","XBI":"SPDR S&P Biotech","GXC":"SPDR S&P China","XSD":"SPDR S&P Semiconductor","EMLC":"VanEck EM Local Currency Bond","IBUY":"Amplify Online Retail","KIE":"SPDR S&P Insurance","DRIV":"Global X Autonomous & EV","XHS":"SPDR S&P Health Care Services","DXYZ":"Destiny Tech100","PBE":"Invesco Biotech & Genome","RSP":"Invesco S&P 500 Equal Weight","XLF":"Financial Select SPDR","KCE":"SPDR S&P Capital Markets","SLV":"iShares Silver Trust","IHF":"iShares US Healthcare Providers","RSPR":"Invesco S&P 500 EW Real Estate","RSPF":"Invesco S&P 500 EW Financials","IHI":"iShares US Medical Devices","IYG":"iShares US Financial Services","GLD":"SPDR Gold","LIT":"Global X Lithium & Battery Tech","MJ":"Amplify Alternative Harvest","KWEB":"KraneShares CSI China Internet","ROBO":"ROBO Global Robotics & Automation","IWO":"iShares Russell 2000 Growth","XLI":"Industrials Select SPDR","IYT":"iShares US Transportation","PAVE":"Global X US Infrastructure Dev","RSPN":"Invesco S&P 500 EW Industrials","PEJ":"Invesco Leisure & Entertainment","XTN":"SPDR S&P Transportation","REMX":"VanEck Rare Earth & Strategic Metals","PRNT":"3D Printing ETF","ARKG":"ARK Genomic Revolution","XHE":"SPDR S&P Health Care Equipment","KBE":"SPDR S&P Bank","JETS":"US Global Jets","BJK":"VanEck Gaming","IPAY":"Amplify Digital Payments","NLR":"VanEck Uranium & Nuclear","URA":"Global X Uranium","IYC":"iShares US Consumer Discretionary","KRE":"SPDR S&P Regional Banking","FFTY":"Innovator IBD 50","IBB":"iShares Biotechnology","KRBN":"KraneShares Global Carbon","RTH":"VanEck Retail","SLX":"VanEck Steel","SOCL":"Global X Social Media","BOTZ":"Global X Robotics & AI","SMIN":"iShares MSCI India Small-Cap","RSPH":"Invesco S&P 500 EW Healthcare","IWM":"iShares Russell 2000","IAK":"iShares US Insurance","XHB":"SPDR S&P Homebuilders","SIL":"Global X Silver Miners","SILJ":"Amplify Jr Silver Miners","SPPP":"Sprott Platinum & Palladium","GDXJ":"VanEck Junior Gold Miners","GDX":"VanEck Gold Miners","BBH":"VanEck Biotech","XME":"SPDR S&P Metals & Mining","URNM":"Sprott Uranium Miners","COPX":"Global X Copper Miners","XPH":"SPDR S&P Pharmaceuticals","XLV":"Health Care Select SPDR","XLY":"Consumer Discr Select SPDR","EVX":"VanEck Environmental Services","IYK":"iShares US Consumer Staples","XLB":"Materials Select SPDR","PPH":"VanEck Pharmaceutical","WOOD":"iShares Global Timber","XLP":"Consumer Staples Select SPDR","FTXG":"FT Nasdaq Food & Beverage","RSPS":"Invesco S&P 500 EW Cons Staples","PHO":"Invesco Water Resources","XRT":"SPDR S&P Retail","RSPD":"Invesco S&P 500 EW Cons Disc","ITB":"iShares US Home Construction",
 }
 
+# ── Watchlist persistence ──────────────────────────────────────────────────
+# DEFAULT_WATCHLISTS is the single source of truth.
+# On Vercel: always return a fresh copy of defaults. No Redis for watchlists.
+# User edits (add/remove ticker) are stored as a tiny delta in Redis.
+# If delta is missing/corrupt: full defaults returned — never empty themes.
 
-# ── Persistence ────────────────────────────────────────────────────────────────
-# ── Watchlist persistence ─────────────────────────────────────────────────────
-# On Vercel: DEFAULT_WATCHLISTS is always the base. Redis stores only the user
-# delta (added/removed tickers, new themes). Loaded and merged on every call.
-# Cannot produce empty themes for default themes.
+def load_watchlists():
+    base = copy.deepcopy(DEFAULT_WATCHLISTS)
+    # Try to apply user delta
+    try:
+        raw = kv_get("wl_delta") if IS_VERCEL else None
+        if not IS_VERCEL and os.path.exists(DATA_FILE):
+            with open(DATA_FILE) as f:
+                return json.load(f)
+        if raw and len(raw) > 5:
+            delta = json.loads(raw)
+            # Apply added tickers
+            for theme, tickers in delta.get("added", {}).items():
+                if theme in base["themes"]:
+                    have = set(base["themes"][theme])
+                    base["themes"][theme] += [t for t in tickers if t not in have]
+            # Apply removed tickers
+            for theme, tickers in delta.get("removed", {}).items():
+                if theme in base["themes"]:
+                    rm = set(tickers)
+                    base["themes"][theme] = [t for t in base["themes"][theme] if t not in rm]
+            # Apply custom new themes
+            for theme, tickers in delta.get("custom", {}).items():
+                if theme not in base["themes"]:
+                    base["themes"][theme] = list(tickers)
+                    if theme not in base["order"]:
+                        base["order"].append(theme)
+    except Exception as e:
+        print(f"[wl] Delta error (using defaults): {e}")
+    # FINAL SAFETY: every default theme must have tickers
+    for theme, tickers in DEFAULT_WATCHLISTS["themes"].items():
+        if len(base["themes"].get(theme, [])) == 0:
+            base["themes"][theme] = list(tickers)
+    return base
 
-import copy as _copy
-
-def _fresh_copy():
-    return _copy.deepcopy(DEFAULT_WATCHLISTS)
-
-def _apply_delta(delta):
-    data = _fresh_copy()
-    for theme, tickers in delta.get("added", {}).items():
-        if theme in data["themes"]:
-            have = set(data["themes"][theme])
-            data["themes"][theme] += [t for t in tickers if t not in have]
-    for theme, tickers in delta.get("removed", {}).items():
-        if theme in data["themes"]:
-            rm = set(tickers)
-            data["themes"][theme] = [t for t in data["themes"][theme] if t not in rm]
-    for theme, tickers in delta.get("custom", {}).items():
-        if theme not in data["themes"]:
-            data["themes"][theme] = list(tickers)
-            if theme not in data["order"]:
-                data["order"].append(theme)
-    return data
-
-def _make_delta(data):
+def save_watchlists(data):
+    if not IS_VERCEL:
+        try:
+            with open(DATA_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+            return
+        except: pass
+    # Compute delta vs defaults
     delta = {"added": {}, "removed": {}, "custom": {}}
     defaults = DEFAULT_WATCHLISTS["themes"]
     for theme, tickers in data["themes"].items():
@@ -192,427 +211,417 @@ def _make_delta(data):
             removed = [t for t in defaults[theme] if t not in set(tickers)]
             if added:   delta["added"][theme]   = added
             if removed: delta["removed"][theme] = removed
-    return delta
+    kv_set("wl_delta", json.dumps(delta))
 
-def load_watchlists():
-    # ALWAYS start from DEFAULT. Never trust a stored full watchlist.
-    if IS_VERCEL:
-        raw = kv_get("wl_delta")
-        if raw and raw.strip() not in ("", "{}", "null"):
-            try:
-                delta = json.loads(raw)
-                return _apply_delta(delta)
-            except:
-                pass
-        return _fresh_copy()
-    # Local dev: try file
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE) as f:
-                return json.load(f)
-        except:
-            pass
-    return _fresh_copy()
 
-def save_watchlists(data):
-    if IS_VERCEL:
-        delta = _make_delta(data)
-        kv_set("wl_delta", json.dumps(delta))
-    else:
-        try:
-            with open(DATA_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except:
-            pass
-
-# ── Cache ──────────────────────────────────────────────────────────────────────
-_fc={};_cm={"date":None,"source":None,"loaded_at":None};_lc={};_ec={}
-LIVE_TTL=300;EXT_TTL=14400
+# ── Price cache ─────────────────────────────────────────────────────────────
+_fc = {}
+_cm = {"date": None, "source": None, "loaded_at": None}
+_lc = {}
+_ec = {}
+LIVE_TTL = 300
+EXT_TTL  = 14400
 
 def _load_file_cache():
-    global _fc,_cm
+    global _fc, _cm
     try:
-        raw=json.load(open(CACHE_FILE))
-        _fc=raw.get("tickers",{});_cm.update(date=raw.get("updated_date"),source=raw.get("source"),loaded_at=datetime.now())
-        print(f"[cache] {len(_fc)} tickers  date={_cm['date']}  src={_cm['source']}")
+        with open(CACHE_FILE) as f:
+            raw = json.load(f)
+        _fc = raw.get("tickers", {})
+        _cm.update(date=raw.get("updated_date"), source=raw.get("source"), loaded_at=datetime.now())
+        print(f"[cache] file {len(_fc)} tickers  date={_cm['date']}")
     except FileNotFoundError:
         raw = kv_get("prices_cache")
         if raw:
             try:
                 data = json.loads(raw)
-                tickers = data.get("tickers",{})
+                tickers = data.get("tickers", {})
                 if len(tickers) > 5000:
-                    # Old bloated cache — skip it, will be replaced on next REFRESH TV
-                    print(f"[cache] Stale bloated cache ({len(tickers)} tickers) — skipping.")
+                    print(f"[cache] Bloated cache ({len(tickers)}) skipped")
                 else:
                     _fc = tickers
                     _cm.update(date=data.get("updated_date"), source=data.get("source","redis")+"(kv)", loaded_at=datetime.now())
                     print(f"[cache] Redis {len(_fc)} tickers  date={_cm['date']}")
                     try:
-                        with open(CACHE_FILE,"w") as f: json.dump(data,f)
+                        with open(CACHE_FILE, "w") as f: json.dump(data, f)
                     except: pass
-            except Exception as ex: print(f"[cache] Redis parse error: {ex}")
-        else: print("[cache] No cache — yfinance fallback.")
-    except Exception as e: print(f"[cache] Error: {e}")
+            except Exception as e:
+                print(f"[cache] Redis parse error: {e}")
+        else:
+            print("[cache] No cache found")
+    except Exception as e:
+        print(f"[cache] Error: {e}")
 
-def _fresh(): return bool(_fc and _cm["date"]==_date.today().isoformat())
+def _fresh():
+    return bool(_fc and _cm["date"] == _date.today().isoformat())
 
-def _pct(s,a,b):
+def _pct(s, a, b):
     try:
-        n,o=float(s.iloc[a]),float(s.iloc[b])
-        return round((n-o)/abs(o)*100,2) if o else None
+        n, o = float(s.iloc[a]), float(s.iloc[b])
+        return round((n - o) / abs(o) * 100, 2) if o else None
     except: return None
 
 def _live_fetch(tickers):
-    now=datetime.now()
-    need=[t for t in tickers if t not in _lc or (now-_lc[t]["fa"]).total_seconds()>LIVE_TTL]
+    if IS_VERCEL: return   # never call yfinance on Vercel
+    now = datetime.now()
+    need = [t for t in tickers if t not in _lc or (now - _lc[t]["fa"]).total_seconds() > LIVE_TTL]
     if not need: return
     try:
         import pandas as pd
-        raw=yf.download(need,period="35d",interval="1d",auto_adjust=True,progress=False,threads=True)
-        cl=raw["Close"] if isinstance(raw.columns,pd.MultiIndex) else raw
-        if len(need)==1: cl=cl.to_frame(name=need[0])
+        raw = yf.download(need, period="35d", interval="1d", auto_adjust=True, progress=False, threads=True)
+        cl = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+        if len(need) == 1: cl = cl.to_frame(name=need[0])
         for t in need:
             try:
-                s=cl[t].dropna()
-                _lc[t]={"price":round(float(s.iloc[-1]),2) if len(s)>=1 else None,"chg_1d":_pct(s,-1,-2),"chg_1w":_pct(s,-1,-6) if len(s)>=6 else None,"chg_1m":_pct(s,-1,-22) if len(s)>=22 else None,"fa":now}
-            except: _lc[t]={"price":None,"chg_1d":None,"chg_1w":None,"chg_1m":None,"fa":now}
+                s = cl[t].dropna()
+                _lc[t] = {"price": round(float(s.iloc[-1]), 2) if len(s) >= 1 else None,
+                           "chg_1d": _pct(s, -1, -2), "chg_1w": _pct(s, -1, -6) if len(s) >= 6 else None,
+                           "chg_1m": _pct(s, -1, -22) if len(s) >= 22 else None, "fa": now}
+            except: _lc[t] = {"price": None, "chg_1d": None, "chg_1w": None, "chg_1m": None, "fa": now}
     except:
-        for t in need: _lc[t]={"price":None,"chg_1d":None,"chg_1w":None,"chg_1m":None,"fa":datetime.now()}
+        for t in need: _lc[t] = {"price": None, "chg_1d": None, "chg_1w": None, "chg_1m": None, "fa": datetime.now()}
 
 def _ext_fetch(tickers):
-    now=datetime.now()
-    need=[t for t in tickers if t not in _ec or (now-_ec[t]["fa"]).total_seconds()>EXT_TTL]
+    if IS_VERCEL: return   # never call yfinance on Vercel
+    now = datetime.now()
+    need = [t for t in tickers if t not in _ec or (now - _ec[t]["fa"]).total_seconds() > EXT_TTL]
     if not need: return
     try:
         import pandas as pd
-        raw=yf.download(need,period="1y",interval="1d",auto_adjust=True,progress=False,threads=True)
-        cl=raw["Close"] if isinstance(raw.columns,pd.MultiIndex) else raw
-        if len(need)==1: cl=cl.to_frame(name=need[0])
-        ytd0=_date.today().replace(month=1,day=1)
+        raw = yf.download(need, period="1y", interval="1d", auto_adjust=True, progress=False, threads=True)
+        cl = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+        if len(need) == 1: cl = cl.to_frame(name=need[0])
+        ytd0 = _date.today().replace(month=1, day=1)
         for t in need:
             try:
-                s=cl[t].dropna()
-                c3m=_pct(s,-1,-65) if len(s)>=65 else _pct(s,-1,0)
-                cy=None
+                s = cl[t].dropna()
+                c3m = _pct(s, -1, -65) if len(s) >= 65 else _pct(s, -1, 0)
+                cy = None
                 try:
-                    sy=s[s.index.date>=ytd0]
-                    if len(sy)>=2: cy=_pct(sy,-1,0)
+                    sy = s[s.index.date >= ytd0]
+                    if len(sy) >= 2: cy = _pct(sy, -1, 0)
                 except: pass
-                _ec[t]={"chg_3m":c3m,"chg_ytd":cy,"fa":now}
-            except: _ec[t]={"chg_3m":None,"chg_ytd":None,"fa":now}
+                _ec[t] = {"chg_3m": c3m, "chg_ytd": cy, "fa": now}
+            except: _ec[t] = {"chg_3m": None, "chg_ytd": None, "fa": now}
     except:
-        for t in need: _ec[t]={"chg_3m":None,"chg_ytd":None,"fa":datetime.now()}
+        for t in need: _ec[t] = {"chg_3m": None, "chg_ytd": None, "fa": datetime.now()}
 
 def fetch_prices(tickers):
     if _cm["loaded_at"] is None: _load_file_cache()
     else:
         try:
-            if datetime.fromtimestamp(os.path.getmtime(CACHE_FILE))>_cm["loaded_at"]: _load_file_cache()
-        except FileNotFoundError: pass
-    result,miss={},[]
+            if datetime.fromtimestamp(os.path.getmtime(CACHE_FILE)) > _cm["loaded_at"]: _load_file_cache()
+        except: pass
+    result, miss = {}, []
     for t in tickers:
-        if t in _fc and _fc[t].get("price") is not None: result[t]=_fc[t]
+        if t in _fc and _fc[t].get("price") is not None: result[t] = _fc[t]
         else: miss.append(t)
     if miss and not IS_VERCEL:
         _live_fetch(miss)
         for t in miss:
-            if t in _lc: result[t]={k:v for k,v in _lc[t].items() if k!="fa"}
+            if t in _lc: result[t] = {k: v for k, v in _lc[t].items() if k != "fa"}
     return result
 
 def fetch_ext(tickers):
-    result,need={},[]
+    result, need = {}, []
     for t in tickers:
-        fc=_fc.get(t,{})
-        if fc.get("chg_3m") is not None or fc.get("chg_ytd") is not None: result[t]={"chg_3m":fc.get("chg_3m"),"chg_ytd":fc.get("chg_ytd")}
+        fc = _fc.get(t, {})
+        if fc.get("chg_3m") is not None or fc.get("chg_ytd") is not None:
+            result[t] = {"chg_3m": fc.get("chg_3m"), "chg_ytd": fc.get("chg_ytd")}
         else: need.append(t)
     if need and not IS_VERCEL:
         _ext_fetch(need)
         for t in need:
-            if t in _ec: result[t]={"chg_3m":_ec[t]["chg_3m"],"chg_ytd":_ec[t]["chg_ytd"]}
+            if t in _ec: result[t] = {"chg_3m": _ec[t]["chg_3m"], "chg_ytd": _ec[t]["chg_ytd"]}
     return result
 
-# ── RS Universe ────────────────────────────────────────────────────────────────
-_rs_s={};_rs_s_at=None;_rs_e={};_rs_e_at=None;RS_TTL=3600
+# ── RS Universe ──────────────────────────────────────────────────────────────
+_rs_s = {}; _rs_s_at = None; _rs_e = {}; _rs_e_at = None; RS_TTL = 3600
 
 def _build_rs(tickers):
-    prices=fetch_prices(tickers)
-    pairs=[(t,prices[t]["chg_1m"]) for t in tickers if t in prices and prices[t].get("chg_1m") is not None]
+    prices = fetch_prices(tickers)
+    pairs = [(t, prices[t]["chg_1m"]) for t in tickers if t in prices and prices[t].get("chg_1m") is not None]
     if not pairs: return {}
-    pairs.sort(key=lambda x:x[1])
-    n=len(pairs)
-    return {t:(round(rank/(n-1)*100) if n>1 else 50) for rank,(t,_) in enumerate(pairs)}
+    pairs.sort(key=lambda x: x[1])
+    n = len(pairs)
+    return {t: (round(rank / (n - 1) * 100) if n > 1 else 50) for rank, (t, _) in enumerate(pairs)}
 
 def get_rs_stocks():
-    global _rs_s,_rs_s_at
-    now=datetime.now()
-    if not _rs_s or _rs_s_at is None or (now-_rs_s_at).total_seconds()>RS_TTL:
-        data=load_watchlists()
-        tickers=sorted({t for v in data["themes"].values() for t in v})
-        _rs_s=_build_rs(tickers);_rs_s_at=now
+    global _rs_s, _rs_s_at
+    now = datetime.now()
+    if not _rs_s or _rs_s_at is None or (now - _rs_s_at).total_seconds() > RS_TTL:
+        data = load_watchlists()
+        tickers = sorted({t for v in data["themes"].values() for t in v})
+        _rs_s = _build_rs(tickers); _rs_s_at = now
         print(f"[rs-stocks] {len(_rs_s)} ranked")
     return _rs_s
 
 def get_rs_etfs():
-    global _rs_e,_rs_e_at
-    now=datetime.now()
-    if not _rs_e or _rs_e_at is None or (now-_rs_e_at).total_seconds()>RS_TTL:
-        _rs_e=_build_rs(ETF_TICKERS);_rs_e_at=now
+    global _rs_e, _rs_e_at
+    now = datetime.now()
+    if not _rs_e or _rs_e_at is None or (now - _rs_e_at).total_seconds() > RS_TTL:
+        _rs_e = _build_rs(ETF_TICKERS); _rs_e_at = now
         print(f"[rs-etfs] {len(_rs_e)} ranked")
     return _rs_e
 
-# ── Finviz ─────────────────────────────────────────────────────────────────────
+# ── Finviz ───────────────────────────────────────────────────────────────────
 def finviz_peers(ticker):
     try:
-        r=requests.get(f"https://finviz.com/quote.ashx?t={ticker}&ty=c&ta=0&p=d",headers=HEADERS,timeout=10)
-        if r.status_code!=200: return {"name":ticker,"peers":[],"error":f"HTTP {r.status_code}"}
-        soup=BeautifulSoup(r.text,"html.parser")
-        nt=soup.find("h2",class_="quote-header_ticker-wrapper_company")
-        name=nt.get_text(strip=True) if nt else ticker
-        peers=[]
+        r = requests.get(f"https://finviz.com/quote.ashx?t={ticker}&ty=c&ta=0&p=d", headers=HEADERS, timeout=10)
+        if r.status_code != 200: return {"name": ticker, "peers": [], "error": f"HTTP {r.status_code}"}
+        soup = BeautifulSoup(r.text, "html.parser")
+        nt = soup.find("h2", class_="quote-header_ticker-wrapper_company")
+        name = nt.get_text(strip=True) if nt else ticker
+        peers = []
         for td in soup.find_all("td"):
-            if td.get_text(strip=True)=="Peers":
-                ptd=td.find_next_sibling("td")
-                if ptd: peers=[a.get_text(strip=True) for a in ptd.find_all("a") if a.get_text(strip=True)]
+            if td.get_text(strip=True) == "Peers":
+                ptd = td.find_next_sibling("td")
+                if ptd: peers = [a.get_text(strip=True) for a in ptd.find_all("a") if a.get_text(strip=True)]
                 break
-        sector=industry=""
+        sector = industry = ""
         for td in soup.find_all("td"):
-            txt=td.get_text(strip=True)
-            if txt=="Sector": sector=(td.find_next_sibling("td") or td).get_text(strip=True)
-            if txt=="Industry": industry=(td.find_next_sibling("td") or td).get_text(strip=True)
-        return {"name":name,"peers":peers,"sector":sector,"industry":industry,"error":None}
-    except Exception as e: return {"name":ticker,"peers":[],"error":str(e)}
+            txt = td.get_text(strip=True)
+            if txt == "Sector": sector = (td.find_next_sibling("td") or td).get_text(strip=True)
+            if txt == "Industry": industry = (td.find_next_sibling("td") or td).get_text(strip=True)
+        return {"name": name, "peers": peers, "sector": sector, "industry": industry, "error": None}
+    except Exception as e: return {"name": ticker, "peers": [], "error": str(e)}
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+
+# ── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/")
 def index(): return render_template_string(HTML)
 
 @app.route("/api/themes")
 def api_themes():
-    data=load_watchlists()
-    return jsonify({"order":data.get("order",list(data["themes"].keys())),"themes":{k:len(v) for k,v in data["themes"].items()}})
+    data = load_watchlists()
+    return jsonify({"order": data.get("order", list(data["themes"].keys())),
+                    "themes": {k: len(v) for k, v in data["themes"].items()}})
+
+@app.route("/api/all_theme_perfs")
+def api_all_theme_perfs():
+    data    = load_watchlists()
+    themes  = data["themes"]
+    order   = data.get("order", list(themes.keys()))
+    all_tix = list({t for v in themes.values() for t in v})
+    if _cm["loaded_at"] is None: _load_file_cache()
+    prices  = fetch_prices(all_tix)
+    rs_uni  = get_rs_stocks()
+    result  = {}
+    for theme, tickers in themes.items():
+        if not tickers:
+            result[theme] = {"avg_1d": None, "avg_1w": None, "avg_1m": None, "avg_rs": None, "adv": 0, "dec": 0, "count": 0}
+            continue
+        def avg(field, tkrs=tickers):
+            v = [prices[t][field] for t in tkrs if t in prices and prices[t].get(field) is not None]
+            return round(sum(v) / len(v), 2) if v else None
+        rs_v = [rs_uni[t] for t in tickers if rs_uni.get(t) is not None]
+        result[theme] = {
+            "avg_1d":  avg("chg_1d"),  "avg_1w": avg("chg_1w"), "avg_1m": avg("chg_1m"),
+            "avg_rs":  round(sum(rs_v) / len(rs_v)) if rs_v else None,
+            "adv":     sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0) > 0),
+            "dec":     sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0) < 0),
+            "count":   len(tickers),
+        }
+    return jsonify({"themes": result, "order": order})
 
 @app.route("/api/watchlist/<path:theme>")
 def api_watchlist(theme):
-    data=load_watchlists();tickers=data["themes"].get(theme,[])
-    if not tickers: return jsonify({"theme":theme,"rows":[],"avg_rs":None})
-    prices=fetch_prices(tickers);ext=fetch_ext(tickers);rs_uni=get_rs_stocks()
-    rows=[]
+    data    = load_watchlists()
+    tickers = data["themes"].get(theme, [])
+    if not tickers: return jsonify({"theme": theme, "rows": [], "avg_rs": None})
+    prices  = fetch_prices(tickers)
+    ext     = fetch_ext(tickers)
+    rs_uni  = get_rs_stocks()
+    rows = []
     for t in tickers:
-        p=prices.get(t,{});ex=ext.get(t,{})
-        rows.append({"ticker":t,"price":p.get("price"),"chg_1d":p.get("chg_1d"),"chg_1w":p.get("chg_1w"),"chg_1m":p.get("chg_1m"),"chg_3m":ex.get("chg_3m"),"chg_ytd":ex.get("chg_ytd"),"rs":rs_uni.get(t)})
-    rows.sort(key=lambda r:r["chg_1d"] if r["chg_1d"] is not None else -999,reverse=True)
-    rs_v=[r["rs"] for r in rows if r["rs"] is not None]
-    return jsonify({"theme":theme,"rows":rows,"avg_rs":round(sum(rs_v)/len(rs_v)) if rs_v else None})
+        p = prices.get(t, {}); ex = ext.get(t, {})
+        rows.append({"ticker": t, "price": p.get("price"), "chg_1d": p.get("chg_1d"),
+                     "chg_1w": p.get("chg_1w"), "chg_1m": p.get("chg_1m"),
+                     "chg_3m": ex.get("chg_3m"), "chg_ytd": ex.get("chg_ytd"), "rs": rs_uni.get(t)})
+    rows.sort(key=lambda r: r["chg_1d"] if r["chg_1d"] is not None else -999, reverse=True)
+    rs_v = [r["rs"] for r in rows if r["rs"] is not None]
+    return jsonify({"theme": theme, "rows": rows, "avg_rs": round(sum(rs_v) / len(rs_v)) if rs_v else None})
 
 @app.route("/api/theme_perf/<path:theme>")
 def api_theme_perf(theme):
-    data=load_watchlists();tickers=data["themes"].get(theme,[])
-    if not tickers: return jsonify({"theme":theme,"avg_1d":None,"avg_1w":None,"avg_1m":None,"avg_rs":None,"count":0,"adv":0,"dec":0})
-    prices=fetch_prices(tickers);rs_uni=get_rs_stocks()
-    def avg(f): v=[prices[t][f] for t in tickers if t in prices and prices[t].get(f) is not None]; return round(sum(v)/len(v),2) if v else None
-    rs_v=[rs_uni[t] for t in tickers if rs_uni.get(t) is not None]
-    return jsonify({"theme":theme,"count":len(tickers),"avg_1d":avg("chg_1d"),"avg_1w":avg("chg_1w"),"avg_1m":avg("chg_1m"),"avg_rs":round(sum(rs_v)/len(rs_v)) if rs_v else None,"adv":sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)>0),"dec":sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)<0)})
+    data    = load_watchlists()
+    tickers = data["themes"].get(theme, [])
+    if not tickers: return jsonify({"theme": theme, "avg_1d": None, "avg_1w": None, "avg_1m": None, "avg_rs": None, "count": 0, "adv": 0, "dec": 0})
+    prices  = fetch_prices(tickers)
+    rs_uni  = get_rs_stocks()
+    def avg(f): v = [prices[t][f] for t in tickers if t in prices and prices[t].get(f) is not None]; return round(sum(v) / len(v), 2) if v else None
+    rs_v = [rs_uni[t] for t in tickers if rs_uni.get(t) is not None]
+    return jsonify({"theme": theme, "count": len(tickers), "avg_1d": avg("chg_1d"),
+                    "avg_1w": avg("chg_1w"), "avg_1m": avg("chg_1m"),
+                    "avg_rs": round(sum(rs_v) / len(rs_v)) if rs_v else None,
+                    "adv": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0) > 0),
+                    "dec": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0) < 0)})
 
-@app.route("/api/add_stock",methods=["POST"])
+@app.route("/api/add_stock", methods=["POST"])
 def api_add_stock():
-    b=request.get_json();theme=b.get("theme","").strip();tickers=[t.strip().upper() for t in b.get("tickers",[]) if t.strip()]
-    if not theme or not tickers: return jsonify({"error":"Missing"}),400
-    data=load_watchlists()
-    if theme not in data["themes"]: data["themes"][theme]=[]; data["order"].append(theme)
-    ex=set(data["themes"][theme]);added=[t for t in tickers if t not in ex]
-    data["themes"][theme].extend(added);save_watchlists(data)
-    return jsonify({"added":added,"theme":theme})
+    b = request.get_json(); theme = b.get("theme", "").strip()
+    tickers = [t.strip().upper() for t in b.get("tickers", []) if t.strip()]
+    if not theme or not tickers: return jsonify({"error": "Missing"}), 400
+    data = load_watchlists()
+    if theme not in data["themes"]: data["themes"][theme] = []; data["order"].append(theme)
+    ex = set(data["themes"][theme]); added = [t for t in tickers if t not in ex]
+    data["themes"][theme].extend(added); save_watchlists(data)
+    return jsonify({"added": added, "theme": theme})
 
-@app.route("/api/remove_stock",methods=["POST"])
+@app.route("/api/remove_stock", methods=["POST"])
 def api_remove_stock():
-    b=request.get_json();theme=b.get("theme","").strip();ticker=b.get("ticker","").strip().upper()
-    data=load_watchlists()
+    b = request.get_json(); theme = b.get("theme", "").strip(); ticker = b.get("ticker", "").strip().upper()
+    data = load_watchlists()
     if theme in data["themes"] and ticker in data["themes"][theme]:
-        data["themes"][theme].remove(ticker);save_watchlists(data)
-    return jsonify({"ok":True})
+        data["themes"][theme].remove(ticker); save_watchlists(data)
+    return jsonify({"ok": True})
 
-@app.route("/api/add_theme",methods=["POST"])
+@app.route("/api/add_theme", methods=["POST"])
 def api_add_theme():
-    theme=request.get_json().get("theme","").strip()
-    if not theme: return jsonify({"error":"Empty"}),400
-    data=load_watchlists()
-    if theme not in data["themes"]: data["themes"][theme]=[]; data["order"].append(theme); save_watchlists(data)
-    return jsonify({"ok":True,"theme":theme})
+    theme = request.get_json().get("theme", "").strip()
+    if not theme: return jsonify({"error": "Empty"}), 400
+    data = load_watchlists()
+    if theme not in data["themes"]: data["themes"][theme] = []; data["order"].append(theme); save_watchlists(data)
+    return jsonify({"ok": True, "theme": theme})
 
 @app.route("/api/peers/<ticker>")
 def api_peers(ticker): return jsonify(finviz_peers(ticker.upper()))
 
-@app.route("/api/cleanup",methods=["POST"])
+@app.route("/api/cleanup", methods=["POST"])
 def api_cleanup():
-    data=load_watchlists()
-    all_tix=list({t for v in data["themes"].values() for t in v})
-    if not all_tix: return jsonify({"removed":[],"total_checked":0})
+    data = load_watchlists()
+    all_tix = list({t for v in data["themes"].values() for t in v})
+    if not all_tix: return jsonify({"removed": [], "total_checked": 0})
     try:
         import pandas as pd
-        raw=yf.download(all_tix,period="5d",interval="1d",auto_adjust=True,progress=False,threads=True)
-        cl=raw["Close"] if "Close" in raw.columns else raw.xs("Close",axis=1,level=0)
-        if len(all_tix)==1: cl=cl.to_frame(name=all_tix[0])
-    except Exception as e: return jsonify({"error":str(e)}),500
-    bad={t for t in all_tix if t not in cl.columns or len(cl[t].dropna())==0}
-    rm,changed={},False
-    for theme,tickers in data["themes"].items():
-        before=tickers[:]
-        data["themes"][theme]=[t for t in tickers if t not in bad]
-        removed=[t for t in before if t in bad]
-        if removed: rm[theme]=removed;changed=True
+        raw = yf.download(all_tix, period="5d", interval="1d", auto_adjust=True, progress=False, threads=True)
+        cl = raw["Close"] if "Close" in raw.columns else raw.xs("Close", axis=1, level=0)
+        if len(all_tix) == 1: cl = cl.to_frame(name=all_tix[0])
+    except Exception as e: return jsonify({"error": str(e)}), 500
+    bad = {t for t in all_tix if t not in cl.columns or len(cl[t].dropna()) == 0}
+    rm, changed = {}, False
+    for theme, tickers in data["themes"].items():
+        before = tickers[:]
+        data["themes"][theme] = [t for t in tickers if t not in bad]
+        removed = [t for t in before if t in bad]
+        if removed: rm[theme] = removed; changed = True
     if changed: save_watchlists(data)
-    return jsonify({"removed_map":rm,"total_removed":sum(len(v) for v in rm.values()),"total_checked":len(all_tix)})
+    return jsonify({"removed_map": rm, "total_removed": sum(len(v) for v in rm.values()), "total_checked": len(all_tix)})
 
 @app.route("/api/etf/list")
 def api_etf_list():
-    rs_uni=get_rs_etfs()
-    prices=fetch_prices(ETF_TICKERS);ext=fetch_ext(ETF_TICKERS)
-    rows=[]
+    rs_uni = get_rs_etfs(); prices = fetch_prices(ETF_TICKERS); ext = fetch_ext(ETF_TICKERS)
+    rows = []
     for t in ETF_TICKERS:
-        p=prices.get(t,{});ex=ext.get(t,{})
-        rows.append({"ticker":t,"name":ETF_NAMES.get(t,""),"sector":ETF_SECTOR.get(t,""),"price":p.get("price"),"chg_1d":p.get("chg_1d"),"chg_1w":p.get("chg_1w"),"chg_1m":p.get("chg_1m"),"chg_3m":ex.get("chg_3m"),"chg_ytd":ex.get("chg_ytd"),"rs":rs_uni.get(t)})
-    rows.sort(key=lambda r:r["chg_1d"] if r["chg_1d"] is not None else -999,reverse=True)
-    rs_v=[r["rs"] for r in rows if r["rs"] is not None]
-    return jsonify({"rows":rows,"avg_rs":round(sum(rs_v)/len(rs_v)) if rs_v else None,"count":len(rows)})
+        p = prices.get(t, {}); ex = ext.get(t, {})
+        rows.append({"ticker": t, "name": ETF_NAMES.get(t, ""), "sector": ETF_SECTOR.get(t, ""),
+                     "price": p.get("price"), "chg_1d": p.get("chg_1d"), "chg_1w": p.get("chg_1w"),
+                     "chg_1m": p.get("chg_1m"), "chg_3m": ex.get("chg_3m"), "chg_ytd": ex.get("chg_ytd"), "rs": rs_uni.get(t)})
+    rows.sort(key=lambda r: r["chg_1d"] if r["chg_1d"] is not None else -999, reverse=True)
+    rs_v = [r["rs"] for r in rows if r["rs"] is not None]
+    return jsonify({"rows": rows, "avg_rs": round(sum(rs_v) / len(rs_v)) if rs_v else None, "count": len(rows)})
 
 @app.route("/api/cache_status")
-def api_cache_status(): return jsonify({"date":_cm["date"],"source":_cm["source"],"count":len(_fc),"fresh":_fresh()})
+def api_cache_status():
+    return jsonify({"date": _cm["date"], "source": _cm["source"], "count": len(_fc), "fresh": _fresh()})
 
-@app.route("/api/cache_reload",methods=["POST"])
+@app.route("/api/cache_reload", methods=["POST"])
 def api_cache_reload():
-    global _rs_s_at,_rs_e_at
-    _load_file_cache();_rs_s_at=None;_rs_e_at=None
-    return jsonify({"ok":True,"date":_cm["date"],"count":len(_fc)})
+    global _rs_s_at, _rs_e_at
+    _load_file_cache(); _rs_s_at = None; _rs_e_at = None
+    return jsonify({"ok": True, "date": _cm["date"], "count": len(_fc)})
 
-@app.route("/api/all_theme_perfs")
-def api_all_theme_perfs():
-    """Return perf data for ALL themes in one shot — avoids 54 separate cold-start calls."""
-    data = load_watchlists()
-    themes = data["themes"]
-    order  = data.get("order", list(themes.keys()))
-    # Load prices once for all tickers
-    all_tickers = list({t for v in themes.values() for t in v})
-    if _cm["loaded_at"] is None: _load_file_cache()
-    prices = fetch_prices(all_tickers)
-    rs_uni = get_rs_stocks()
-    result = {}
-    for theme, tickers in themes.items():
-        if not tickers:
-            result[theme] = {"avg_1d":None,"avg_1w":None,"avg_1m":None,"avg_rs":None,"adv":0,"dec":0,"count":0}
-            continue
-        def avg(field):
-            v=[prices[t][field] for t in tickers if t in prices and prices[t].get(field) is not None]
-            return round(sum(v)/len(v),2) if v else None
-        rs_v=[rs_uni[t] for t in tickers if rs_uni.get(t) is not None]
-        result[theme]={
-            "avg_1d": avg("chg_1d"),
-            "avg_1w": avg("chg_1w"),
-            "avg_1m": avg("chg_1m"),
-            "avg_rs": round(sum(rs_v)/len(rs_v)) if rs_v else None,
-            "adv": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)>0),
-            "dec": sum(1 for t in tickers if t in prices and (prices[t].get("chg_1d") or 0)<0),
-            "count": len(tickers),
-        }
-    return jsonify({"themes": result, "order": order})
-
-@app.route("/api/refresh_tv",methods=["POST"])
+@app.route("/api/refresh_tv", methods=["POST"])
 def api_refresh_tv():
-    """Fetch prices from TradingView Screener — only stores needed tickers."""
-    global _fc,_cm,_rs_s_at,_rs_e_at
+    global _fc, _cm, _rs_s_at, _rs_e_at
     try:
         from tradingview_screener import Query
-        _,df=(Query()
-            .select('name','close','change','Perf.W','Perf.1M','Perf.3M','Perf.YTD')
-            .limit(10000)
-            .get_scanner_data())
-        wl=load_watchlists()
-        needed=set(ETF_TICKERS)|{t for v in wl["themes"].values() for t in v}
-        tickers_data={}
+        _, df = (Query()
+            .select("name", "close", "change", "Perf.W", "Perf.1M", "Perf.3M", "Perf.YTD")
+            .limit(10000).get_scanner_data())
+        wl     = load_watchlists()
+        needed = set(ETF_TICKERS) | {t for v in wl["themes"].values() for t in v}
         def _f(v):
-            try: return round(float(v),2)
+            try: return round(float(v), 2)
             except: return None
-        for _,row in df.iterrows():
-            t=str(row['name']).split(':')[-1]
+        tickers_data = {}
+        for _, row in df.iterrows():
+            t = str(row["name"]).split(":")[-1]
             if t not in needed: continue
-            tickers_data[t]={"price":_f(row['close']),"chg_1d":_f(row['change']),
-                "chg_1w":_f(row.get('Perf.W')),"chg_1m":_f(row.get('Perf.1M')),
-                "chg_3m":_f(row.get('Perf.3M')),"chg_ytd":_f(row.get('Perf.YTD'))}
-        cache_data={"updated_date":_date.today().isoformat(),"source":"tradingview","tickers":tickers_data}
-        payload=json.dumps(cache_data)
+            tickers_data[t] = {"price": _f(row["close"]), "chg_1d": _f(row["change"]),
+                "chg_1w": _f(row.get("Perf.W")), "chg_1m": _f(row.get("Perf.1M")),
+                "chg_3m": _f(row.get("Perf.3M")), "chg_ytd": _f(row.get("Perf.YTD"))}
+        cache_data = {"updated_date": _date.today().isoformat(), "source": "tradingview", "tickers": tickers_data}
+        payload = json.dumps(cache_data)
         try:
-            with open(CACHE_FILE,"w") as f: f.write(payload)
+            with open(CACHE_FILE, "w") as f: f.write(payload)
         except: pass
-        kv_set("prices_cache",payload)
-        _fc=tickers_data;_cm.update(date=cache_data["updated_date"],source="tradingview",loaded_at=datetime.now())
-        _rs_s_at=None;_rs_e_at=None
-        return jsonify({"ok":True,"count":len(tickers_data),"source":"tradingview","date":cache_data["updated_date"]})
+        kv_set("prices_cache", payload)
+        _fc = tickers_data
+        _cm.update(date=cache_data["updated_date"], source="tradingview", loaded_at=datetime.now())
+        _rs_s_at = None; _rs_e_at = None
+        return jsonify({"ok": True, "count": len(tickers_data), "source": "tradingview", "date": cache_data["updated_date"]})
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/api/upload_cache",methods=["POST"])
+@app.route("/api/upload_cache", methods=["POST"])
 def api_upload_cache():
-    global _fc,_cm,_rs_s_at,_rs_e_at
-    secret=request.headers.get("X-Upload-Secret","")
-    if secret!=UPLOAD_SECRET: return jsonify({"error":"Unauthorized"}),401
+    global _fc, _cm, _rs_s_at, _rs_e_at
+    if request.headers.get("X-Upload-Secret", "") != UPLOAD_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
     try:
-        data=request.get_json(force=True)
-        tickers_data=data.get("tickers",{})
-        if not tickers_data: return jsonify({"error":"Empty tickers"}),400
-        cache_data={"updated_date":data.get("updated_date",_date.today().isoformat()),"source":data.get("source","ibkr"),"tickers":tickers_data}
-        payload=json.dumps(cache_data)
+        data = request.get_json(force=True)
+        tickers_data = data.get("tickers", {})
+        if not tickers_data: return jsonify({"error": "Empty tickers"}), 400
+        cache_data = {"updated_date": data.get("updated_date", _date.today().isoformat()),
+                      "source": data.get("source", "ibkr"), "tickers": tickers_data}
+        payload = json.dumps(cache_data)
         try:
-            with open(CACHE_FILE,"w") as f: f.write(payload)
+            with open(CACHE_FILE, "w") as f: f.write(payload)
         except: pass
-        kv_set("prices_cache",payload)
-        _fc=tickers_data;_cm.update(date=cache_data["updated_date"],source=cache_data["source"],loaded_at=datetime.now())
-        _rs_s_at=None;_rs_e_at=None
-        return jsonify({"ok":True,"count":len(tickers_data),"source":cache_data["source"],"date":cache_data["updated_date"]})
+        kv_set("prices_cache", payload)
+        _fc = tickers_data
+        _cm.update(date=cache_data["updated_date"], source=cache_data["source"], loaded_at=datetime.now())
+        _rs_s_at = None; _rs_e_at = None
+        return jsonify({"ok": True, "count": len(tickers_data), "source": cache_data["source"], "date": cache_data["updated_date"]})
     except Exception as e:
-        return jsonify({"error":str(e)}),500
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/api/reset_watchlists",methods=["POST"])
+@app.route("/api/reset_watchlists", methods=["POST"])
 def api_reset_watchlists():
-    """Wipe all user deltas — restores pure DEFAULT_WATCHLISTS."""
+    try:
+        r = _redis()
+        if r:
+            r.delete("wl_delta")
+            r.delete("watchlists")
+            r.delete("watchlist_diff")
+    except: pass
     try: os.remove(DATA_FILE)
     except: pass
-    try:
-        r = _redis_client()
-        if r:
-            for key in ["wl_delta","watchlist_diff","watchlists"]:
-                r.delete(key)
-    except: pass
-    data = _build_from_delta({})
-    return jsonify({"ok":True,"themes":len(data["themes"]),
-                    "tickers":sum(len(v) for v in data["themes"].values()),
-                    "augmented_reality":data["themes"].get("Augmented Reality",[])})
-
-@app.route("/api/watchlist_status")
-def api_watchlist_status():
     data = load_watchlists()
-    empty = [t for t,v in data["themes"].items() if len(v)==0]
-    raw = kv_get("wl_delta")
-    return jsonify({
-        "empty_themes": empty,
-        "counts": {t:len(v) for t,v in data["themes"].items()},
-        "delta_in_redis": raw is not None,
-        "delta_content": raw[:200] if raw else None,
-        "augmented_reality": data["themes"].get("Augmented Reality",[]),
-    })
+    return jsonify({"ok": True, "themes": len(data["themes"]),
+                    "tickers": sum(len(v) for v in data["themes"].values())})
 
 @app.route("/api/debug")
 def api_debug():
-    data=load_watchlists()
-    redis_ok=False
+    data = load_watchlists()
+    empty = [t for t, v in data["themes"].items() if len(v) == 0]
+    redis_ok = False
     try:
-        r=_redis_client(); redis_ok=r is not None and bool(r.ping())
+        r = _redis(); redis_ok = r is not None and bool(r.ping())
     except: pass
-    return jsonify({"is_vercel":IS_VERCEL,"redis_ok":redis_ok,
-        "fc_count":len(_fc),"theme_count":len(data.get("themes",{})),
-        "cache_date":_cm["date"],"cache_source":_cm["source"]})
+    return jsonify({
+        "is_vercel": IS_VERCEL, "redis_ok": redis_ok,
+        "fc_count": len(_fc), "theme_count": len(data["themes"]),
+        "empty_themes": empty,
+        "ev_battery": data["themes"].get("EV & Battery", []),
+        "augmented_reality": data["themes"].get("Augmented Reality", []),
+        "cache_date": _cm["date"], "cache_source": _cm["source"],
+        "wl_delta_in_redis": kv_get("wl_delta") is not None,
+    })
 
 
-# ── HTML ───────────────────────────────────────────────────────────────────────
+
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1423,12 +1432,11 @@ boot();
 </html>"""
 
 if __name__ == "__main__":
-    load_watchlists(); _load_file_cache()
+    _load_file_cache()
     app.run(debug=False, port=5051)
 
-# Vercel WSGI entry point — errors caught so cold start never crashes
+# Vercel entry point
 try:
-    load_watchlists()
     _load_file_cache()
-except Exception as _startup_err:
-    print(f"[startup] {_startup_err}")
+except Exception as _e:
+    print(f"[startup] {_e}")
